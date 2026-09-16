@@ -3,7 +3,7 @@
 ## Obiettivo
 Realizzare una webapp per videoconferenze di gruppo utilizzando:
 - **LiveKit Cloud** (piano gratuito) per audio/video in tempo reale
-- **Clerk** (piano gratuito, ~10.000 utenti attivi/mese) per l'autenticazione
+- **Supabase** (piano gratuito, ~10.000 utenti attivi/mese) per l'autenticazione
 - **SvelteKit** come framework full-stack (frontend + endpoint API per i token LiveKit)
 
 Alternative valutabili per l'autenticazione: Supabase Auth o Auth0 (entrambi con piano gratuito).
@@ -13,20 +13,20 @@ Alternative valutabili per l'autenticazione: Supabase Auth o Auth0 (entrambi con
 |---|---|
 | Framework | SvelteKit + TypeScript |
 | Video/WebRTC | LiveKit Cloud + `livekit-client` + `livekit-server-sdk` |
-| Autenticazione | Clerk |
+| Autenticazione | Supabase |
 | Stile | Tailwind CSS (opzionale) |
 | Test | Vitest (unit) + Playwright (e2e) |
 | Deploy | Vercel (piano gratuito) |
 
 ## Fase 0 — Setup account e progetto (~0,5 gg)
 - [ ] Creare account LiveKit Cloud → nuovo progetto → recuperare API Key, API Secret e URL `wss://`
-- [ ] Creare account Clerk → nuova applicazione → recuperare Publishable Key e Secret Key
+- [ ] Creare account Supabase → nuova applicazione → recuperare Publishable Key e Secret Key
 - [ ] Inizializzare il progetto SvelteKit con TypeScript, ESLint, Prettier
 - [ ] Creare `.env` con le chiavi (e aggiungerlo a `.gitignore`)
 - [ ] Inizializzare il repository Git e CI di base
 
 ## Fase 1 — Autenticazione (~1 gg)
-- [ ] Installare e configurare l'SDK Clerk per Svelte
+- [ ] Installare e configurare l'SDK Supabase per Svelte
 - [ ] Pagine di login/registrazione
 - [ ] Protezione delle route (es. `/stanza/[nome]` accessibile solo a utenti autenticati)
 - [ ] Rendere la sessione disponibile lato server in `hooks.server.ts`
@@ -75,6 +75,6 @@ Alternative valutabili per l'autenticazione: Supabase Auth o Auth0 (entrambi con
 **Totale stimato: 7-9 giorni lavorativi**
 
 ## Note e rischi
-- Verificare i limiti aggiornati dei piani gratuiti di LiveKit Cloud (minuti/banda) e Clerk (MAU) prima del rilascio
+- Verificare i limiti aggiornati dei piani gratuiti di LiveKit Cloud (minuti/banda) e Supabase (MAU) prima del rilascio
 - Non esporre mai l'API Secret di LiveKit nel frontend: i token vanno generati solo lato server
 - La condivisione schermo e l'audio richiedono browser moderni; prevedere messaggi di fallback
