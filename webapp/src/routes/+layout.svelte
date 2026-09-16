@@ -32,7 +32,9 @@
 	<a href={resolve('/')} class="text-lg font-semibold">VideoApp</a>
 	<nav class="flex items-center gap-4 text-sm">
 		{#if data.user}
-			<span class="hidden text-gray-600 sm:inline">{data.user.email}</span>
+			<a href={resolve('/account')} class="hidden text-gray-600 hover:underline sm:inline">
+				{data.user.email}
+			</a>
 			<form method="POST" action={resolve('/logout')}>
 				<button
 					type="submit"

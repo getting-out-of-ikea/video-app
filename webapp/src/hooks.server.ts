@@ -64,8 +64,11 @@ const authGuard: Handle = async ({ event, resolve }) => {
 	event.locals.session = session;
 	event.locals.user = user;
 
-	// Rooms are only accessible to authenticated users
-	if (!event.locals.session && event.url.pathname.startsWith('/stanza')) {
+	// Rooms and the account page are only accessible to authenticated users
+	if (
+		!event.locals.session &&
+		(event.url.pathname.startsWith('/stanza') || event.url.pathname.startsWith('/account'))
+	) {
 		redirect(303, '/login');
 	}
 

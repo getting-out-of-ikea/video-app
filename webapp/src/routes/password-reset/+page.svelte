@@ -7,11 +7,14 @@
 </script>
 
 <svelte:head>
-	<title>Accedi · VideoApp</title>
+	<title>Password dimenticata · VideoApp</title>
 </svelte:head>
 
 <div class="mx-auto max-w-sm px-4 py-12">
-	<h1 class="text-2xl font-semibold text-gray-900">Accedi o registrati</h1>
+	<h1 class="text-2xl font-semibold text-gray-900">Reimposta la password</h1>
+	<p class="mt-2 text-sm text-gray-600">
+		Inserisci la tua email: ti invieremo un link per scegliere una nuova password.
+	</p>
 
 	{#if form?.error}
 		<p class="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -33,42 +36,20 @@
 				type="email"
 				required
 				autocomplete="email"
-				value={form?.email ?? ''}
 				class="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
 			/>
 		</label>
 
-		<label class="block text-sm font-medium text-gray-700">
-			Password
-			<input
-				name="password"
-				type="password"
-				required
-				minlength="6"
-				autocomplete="current-password"
-				class="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
-			/>
-		</label>
-
-		<div class="flex gap-3 pt-2">
+		<div class="flex items-center gap-3 pt-2">
 			<button
-				formaction="?/login"
+				type="submit"
 				class="flex-1 rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700"
 			>
-				Accedi
+				Invia il link
 			</button>
-			<button
-				formaction="?/signup"
-				class="flex-1 rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-			>
-				Registrati
-			</button>
+			<a href={resolve('/login')} class="text-sm font-medium text-gray-600 hover:underline">
+				Torna al login
+			</a>
 		</div>
 	</form>
-
-	<p class="mt-4 text-center text-sm">
-		<a href={resolve('/password-reset')} class="font-medium text-gray-600 hover:underline">
-			Password dimenticata?
-		</a>
-	</p>
 </div>
