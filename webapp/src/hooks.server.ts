@@ -2,6 +2,13 @@ import { PUBLIC_SUPABASE_PUBLISHABLE_KEY, PUBLIC_SUPABASE_URL } from '$env/stati
 import { createServerClient } from '@supabase/ssr';
 import { type Handle, redirect } from '@sveltejs/kit';
 import { sequence } from '@sveltejs/kit/hooks';
+import ws from 'ws';
+
+// Node.js < 22 has no native WebSocket; polyfill it so @supabase/realtime-js
+// (bundled with supabase-js) can construct its realtime client on the server.
+if (typeof globalThis.WebSocket === 'undefined') {
+	globalThis.WebSocket = ws as unknown as typeof WebSocket;
+}
 
 const supabase: Handle = async ({ event, resolve }) => {
 	/**
