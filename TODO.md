@@ -3,31 +3,31 @@
 L'autenticazione (Fase 1 di `piano.md`) è completata. Seguono i passi per integrare LiveKit (Fasi 2 e 3).
 
 ## 1. Setup
-- [ ] Installare le dipendenze: `npm install livekit-client livekit-server-sdk`
-- [ ] Copiare `.env.example` in `.env` e compilare `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` con i valori del progetto LiveKit Cloud
-- [ ] Verificare che `.env` sia in `.gitignore`
+- [x] Installare le dipendenze: `npm install livekit-client livekit-server-sdk`
+- [x] Copiare `.env.example` in `.env` e compilare `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` con i valori del progetto LiveKit Cloud
+- [x] Verificare che `.env` sia in `.gitignore`
 
 ## 2. Backend — endpoint `POST /api/token`
-- [ ] Creare `src/routes/api/token/+server.ts`
-- [ ] Verificare la sessione con `locals.safeGetSession()`; rispondere `401` se non autenticato
-- [ ] Validare il nome della stanza (es. solo lettere minuscole, numeri e `-`, lunghezza 1–64); rispondere `400` se invalido
+- [x] Creare `src/routes/api/token/+server.ts`
+- [x] Verificare la sessione con `locals.safeGetSession()`; rispondere `401` se non autenticato
+- [x] Validare il nome della stanza (es. solo lettere minuscole, numeri e `-`, lunghezza 1–64); rispondere `400` se invalido
 - [ ] Generare un `AccessToken` (da `livekit-server-sdk`) con:
   - `identity` = `user.id` (Supabase)
   - `name` = `user.email` (mostrata nella stanza)
   - grant video: `roomJoin: true`, `room: <nome stanza>`, `canPublish`, `canSubscribe`
   - scadenza breve (es. `1h`)
-- [ ] Restituire il token come JSON: `{ token }`
-- [ ] Non esporre mai `LIVEKIT_API_SECRET` al client (importare solo da `$env/static/private`)
+- [x] Restituire il token come JSON: `{ token }`
+- [x] Non esporre mai `LIVEKIT_API_SECRET` al client (importare solo da `$env/static/private`)
 
 ## 3. Frontend — pagina stanza `/stanza/[nome]`
-- [ ] Creare `src/routes/stanza/[nome]/+page.svelte` (la route `/stanza` è già protetta in `hooks.server.ts`)
-- [ ] Schermata pre-join: anteprima camera/microfono, selezione dispositivi, pulsante "Entra nella stanza"
-- [ ] Al join: `fetch('/api/token', { method: 'POST', body })` con il nome stanza, poi connessione con `new Room()` e `room.connect(LIVEKIT_URL, token)`
-- [ ] Pubblicare camera e microfono con `room.localParticipant.enableCameraAndMicrophone()`
-- [ ] Griglia responsiva dei partecipanti: tile video/audio per ogni partecipante remoto, aggiornata sugli eventi `RoomEvent.ParticipantConnected/Disconnected` e `RoomEvent.TrackSubscribed/Unsubscribed`
-- [ ] Indicatori "muted" e "speaking" (evento `RoomEvent.ActiveSpeakersChanged`)
-- [ ] Barra controlli: mute/unmute microfono, on/off camera, condivisione schermo (`setScreenShareEnabled`), abbandona stanza (`room.disconnect()`)
-- [ ] Gestione riconnessione automatica (`RoomEvent.Reconnecting/Reconnected`) e stati di errore
+- [x] Creare `src/routes/stanza/[nome]/+page.svelte` (la route `/stanza` è già protetta in `hooks.server.ts`)
+- [x] Schermata pre-join: anteprima camera/microfono, selezione dispositivi, pulsante "Entra nella stanza"
+- [x] Al join: `fetch('/api/token', { method: 'POST', body })` con il nome stanza, poi connessione con `new Room()` e `room.connect(LIVEKIT_URL, token)`
+- [x] Pubblicare camera e microfono con `room.localParticipant.enableCameraAndMicrophone()`
+- [x] Griglia responsiva dei partecipanti: tile video/audio per ogni partecipante remoto, aggiornata sugli eventi `RoomEvent.ParticipantConnected/Disconnected` e `RoomEvent.TrackSubscribed/Unsubscribed`
+- [x] Indicatori "muted" e "speaking" (evento `RoomEvent.ActiveSpeakersChanged`)
+- [x] Barra controlli: mute/unmute microfono, on/off camera, condivisione schermo (`setScreenShareEnabled`), abbandona stanza (`room.disconnect()`)
+- [x] Gestione riconnessione automatica (`RoomEvent.Reconnecting/Reconnected`) e stati di errore
 
 ## 4. Test
 - [ ] Test unitari (Vitest) per `/api/token`: 401 senza sessione, 400 nome stanza invalido, claims del token corretti
