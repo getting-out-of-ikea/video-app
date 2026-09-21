@@ -1,64 +1,66 @@
-# Piano: aggiungere l'autenticazione con Supabase a `temp/` — *Authentication with Supabase: implementation plan*
+# Piano: aggiungere l'autenticazione con Supabase a `temp/` — piano di implementazione
 
-> **Scope.** Everything below targets the app in `temp/` (SvelteKit 2, Svelte 5 runes, Tailwind 4,
-> `adapter-auto`, Vitest + Playwright already configured). The sibling app in `webapp/` already
-> implements the `@supabase/ssr` server pattern (`webapp/src/hooks.server.ts`, `webapp/src/app.d.ts`);
-> this plan deliberately **mirrors those conventions** so the two apps stay consistent. No file in
-> `webapp/` is touched.
+> **Ambito.** Tutto quanto segue riguarda l'app dentro `temp/` (SvelteKit 2, Svelte 5 runes, Tailwind 4,
+> `adapter-auto`, Vitest + Playwright già configurati). L'app sorella in `webapp/` implementa già il
+> pattern server di `@supabase/ssr` (`webapp/src/hooks.server.ts`, `webapp/src/app.d.ts`); questo piano
+> **segue deliberatamente quelle convenzioni**, così le due app restano coerenti. Nessun file dentro
+> `webapp/` viene toccato.
 >
-> **Style of this document.** It is a guide, not a patch. Snippets are short and meant to be typed by
-> you and adapted. Every snippet is followed by the *why*.
+> **Stile del documento.** È una guida, non una patch. Gli snippet sono brevi e servono a essere
+> digitati e adattati. Ogni snippet è seguito dal *perché*.
 
 ---
 
-## Contents
+## Indice
 
-0. [Assumptions](#0-assumptions)
-1. [Mental model](#1-mental-model-read-this-before-writing-code)
-2. [Step-by-step](#2-step-by-step)
-3. [File checklist](#3-file-checklist)
-4. [Order of work](#4-suggested-order-of-work-each-step-ends-in-a-verifiable-state)
-5. [Pitfalls cheat-sheet](#5-pitfalls-cheat-sheet)
-6. [Optional extensions](#6-optional-extensions-pick-later)
-7. [Intentionally out of scope](#7-intentionally-out-of-scope)
-8. [Open questions](#8-open-questions-for-you)
+0. [Presupposti](#0-presupposti)
+1. [Modello mentale](#1-modello-mentale-leggi-prima-di-scrivere-codice)
+2. [Passo per passo](#2-passo-per-passo)
+3. [Checklist dei file](#3-checklist-dei-file)
+4. [Ordine di lavoro consigliato](#4-ordine-di-lavoro-consigliato-ogni-passo-termina-in-uno-stato-verificabile)
+5. [Errori tipici da evitare](#5-errori-tipici-da-evitare-riepilogo)
+6. [Estensioni opzionali](#6-estensioni-opzionali-da-valutare-in-seguito)
+7. [Fuori ambito, volutamente](#7-fuori-ambito-volutamente)
+8. [Domande aperte](#8-domande-aperte)
 
 ---
 
-## 0. Assumptions
+## 0. Presupposti
 
-| # | Assumption |
+| # | Presupposto |
 |---|---|
-| A1 | You already have a Supabase project (org/ref) and can open the dashboard. |
-| A2 | Auth method: **email + password**. Magic link / OTP / OAuth are covered later as optional blocks. |
-| A3 | Email confirmation is **enabled** in the dashboard (Supabase default). |
-| A4 | Only a subset of routes must be private: the `(private)` group and `/stanza/[nome]` — see `piano.md`, Fase 1. |
-| A5 | Session is stored in **cookies** via `@supabase/ssr` (not localStorage), so SSR can read it. |
-| A6 | The app is deployed somewhere with HTTPS in production. |
-| A7 | There is no database schema yet; only `auth.users` and its metadata are used at this stage. |
+| A1 | Hai già un progetto Supabase (org/ref) e puoi aprire la dashboard. |
+| A2 | Metodo di autenticazione scelto: **email + password**. Magic link / OTP / OAuth sono trattati più avanti come blocchi opzionali. |
+| A3 | La conferma email è **attiva** nella dashboard (è il default di Supabase). |
+| A4 | Solo una parte delle route deve essere privata: il gruppo `(private)` e `/stanza/[nome]` — vedi `piano.md`, Fase 1. |
+| A5 | La sessione è salvata in **cookie** tramite `@supabase/ssr` (non in localStorage), così la SSR può leggerla. |
+| A6 | L'app è deployata da qualche parte con HTTPS in produzione. |
+| A7 | Non esiste ancora uno schema di database; a questo stadio si usano solo `auth.users` e i suoi metadata. |
 
 ---
 
-## 1. Mental model (read this before writing code)
+## 1. Modello mentale (leggi prima di scrivere codice)
 
-Three ideas carry the whole design:
+Tre idee reggono tutto il disegno:
 
-1. **One client per context.**
-   - In the **browser**: a single, lazily-created `createBrowserClient`, so the auth state and the
-     refresh timer are not duplicated.
-   - On the **server**: a *new* `createServerClient` **per request**, wired to that request's cookies.
-     A module-level server client would leak one user's session into another user's request.
+1. **Un client per contesto.**
+   - Nel **browser**: un solo `createBrowserClient` creato in modo lazy, così lo stato di autenticazione
+     e il timer di refresh non vengono duplicati.
+   - Sul **server**: un *nuovo* `createServerClient` **per ogni richiesta**, collegato ai cookie di quella
+     richiesta. Un client server a livello di modulo farebbe trapelare la sessione di un utente nella
+     richiesta di un altro.
 
-2. **The session lives in cookies, the truth lives on the auth server.**
-   `auth.getSession()` just reads and decodes the cookie — it is attacker-controllable. Only
-   `auth.getUser()` (or `getClaims()`) asks the Supabase Auth server to validate the JWT. So:
-   **use `getSession()` for cheap UX reads, use `getUser()` for every authorization decision.**
+2. **La sessione vive nei cookie, la verità vive sul server di autenticazione.**
+   `auth.getSession()` si limita a leggere e decodificare il cookie — quindi è controllabile da un
+   attaccante. Solo `auth.getUser()` (o `getClaims()`) chiede al server Supabase Auth di validare il JWT.
+   Quindi: **usa `getSession()` per letture di comodo, usa `getUser()` per ogni decisione di
+   autorizzazione.**
 
-3. **Server-side guard = security boundary; client-side checks = UX only.**
-   Hiding a link is not protection. The protection is a `redirect(303, …)` inside a `load` function
-   or in `hooks.server.ts`.
+3. **Il controllo lato server è il confine di sicurezza; i controlli lato client sono solo UX.**
+   Nascondere un link non è una protezione. La protezione è un `redirect(303, …)` dentro una funzione
+   `load` oppure in `hooks.server.ts`.
 
-Request flow once implemented:
+Flusso di una richiesta, una volta implementato tutto:
 
 ~~~
 browser form POST
@@ -73,30 +75,30 @@ browser form POST
 
 ---
 
-## 2. Step-by-step
+## 2. Passo per passo
 
-### Step 1 — Dependencies and environment variables
+### Step 1 — Dipendenze e variabili d'ambiente
 
 ~~~bash
 npm install @supabase/supabase-js @supabase/ssr
 ~~~
 
-Both are **runtime** dependencies, not devDependencies (they end up in the browser bundle).
+Sono entrambe dipendenze **di runtime**, non devDependencies (finiscono nel bundle del browser).
 
-Create `temp/.env.local` (verify it is git-ignored; `.env.example` stays committed):
+Crea `temp/.env.local` (verifica che sia ignorato da git; `.env.example` resta versionato):
 
 ~~~ini
 PUBLIC_SUPABASE_URL=https://<your-ref>.supabase.co
 PUBLIC_SUPABASE_PUBLISHABLE_KEY=<your-publishable-key>
 ~~~
 
-*Why:* the `PUBLIC_` prefix makes these readable from both server and client code via
-`$env/static/public`. They are safe to ship to the browser **only** because they are the publishable
-key. A `service_role` key must never appear in a `PUBLIC_` variable and must never be imported into
-client code.
+*Perché:* il prefisso `PUBLIC_` le rende leggibili sia dal codice server sia da quello client tramite
+`$env/static/public`. Sono sicure da spedire al browser **solo** perché sono la publishable key. Una
+chiave `service_role` non deve mai comparire in una variabile `PUBLIC_` e non deve mai essere importata
+da codice client.
 
-Optional but recommended — a fail-fast module so a missing variable is a loud error, not a mystery
-`fetch` failure at runtime:
+Opzionale ma consigliato — un modulo che fallisce subito, così una variabile mancante è un errore
+chiaro e non un `fetch` fallito in modo misterioso a runtime:
 
 ~~~ts
 // src/lib/supabase/env.ts
@@ -110,15 +112,15 @@ export const SUPABASE_URL = PUBLIC_SUPABASE_URL;
 export const SUPABASE_KEY = PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 ~~~
 
-> `$env/static/public` inlines the values at build time. If you want one build deployed to several
-> environments, use `$env/dynamic/public` (which is *only* allowed on the server unless you pass it
-> down through `load`). For now, static is simpler.
+> `$env/static/public` incolla i valori in fase di build. Se vuoi un'unica build deployata su più
+> ambienti, usa `$env/dynamic/public` (che è permesso *solo* sul server, a meno di passarlo verso il
+> client attraverso un `load`). Per ora, la versione statica è più semplice.
 
-**Verify:** `npm run dev` still boots.
+**Verifica:** `npm run dev` parte ancora.
 
 ---
 
-### Step 2 — Browser client (`src/lib/supabase/client.ts`)
+### Step 2 — Client browser (`src/lib/supabase/client.ts`)
 
 ~~~ts
 import { createBrowserClient } from '@supabase/ssr';
@@ -133,14 +135,15 @@ export function supabaseBrowserClient(): SupabaseClient {
 }
 ~~~
 
-*Why:* the `??=` singleton matters. Creating a second browser client spawns a second auth listener and
-a second token-refresh timer, which produces random logouts and duplicate `onAuthStateChange` events.
+*Perché:* il singleton con `??=` è importante. Creare un secondo client browser genera un secondo
+listener di autenticazione e un secondo timer di refresh del token, cosa che produce logout casuali ed
+eventi `onAuthStateChange` duplicati.
 
 ---
 
-### Step 3 — Server client + session helper (`src/hooks.server.ts`)
+### Step 3 — Client server + helper di sessione (`src/hooks.server.ts`)
 
-This is the keystone file.
+Questo è il file chiave di volta.
 
 ~~~ts
 import { createServerClient } from '@supabase/ssr';
@@ -188,24 +191,26 @@ export const handle: Handle = async ({ event, resolve }) => {
 };
 ~~~
 
-*Why each piece:*
-- `getAll`/`setAll` is the current `@supabase/ssr` cookie API (older tutorials use `get`/`set`/`remove`
-  and also a `cookieOptions` argument — if you copy from an old post, that is the tell that it is outdated).
-- `path: '/'` guarantees a refresh written from a deep route is visible everywhere.
-- The `safeGetSession` name is the one already used in `webapp/`; keeping it means the same mental
-  model and the same `app.d.ts` shape in both apps.
-- The `filterSerializedResponseHeaders` block is needed for `count: 'exact'` queries and the
-  Supabase API version header.
-- If your Supabase helper ever writes a cookie during a *server component* render, it throws
-  "Cookies can only be modified in a server action or endpoint"; the `setAll` body can be wrapped in
-  `try/catch` to swallow that case, because the session will be persisted on the next real request.
+*Perché ogni pezzo:*
+- `getAll`/`setAll` è l'API cookie attuale di `@supabase/ssr` (i tutorial vecchi usano `get`/`set`/`remove`
+  e anche un argomento `cookieOptions` — se stai copiando da un post vecchio, quello è il segnale che è
+  superato).
+- `path: '/'` garantisce che un refresh scritto da una route profonda sia visibile ovunque.
+- Il nome `safeGetSession` è quello già usato in `webapp/`; mantenerlo significa avere lo stesso modello
+  mentale e la stessa forma in `app.d.ts` in entrambe le app.
+- Il blocco `filterSerializedResponseHeaders` serve per le query con `count: 'exact'` e per l'header di
+  versione dell'API Supabase.
+- Se l'helper di Supabase dovesse mai scrivere un cookie durante il render di un *server component*,
+  verrebbe lanciato l'errore "Cookies can only be modified in a server action or endpoint"; il corpo di
+  `setAll` si può avvolgere in un `try/catch` per ignorare quel caso, perché la sessione verrà comunque
+  salvata alla richiesta successiva.
 
-**Verify:** add a temporary `console.log(await event.locals.safeGetSession())` — you should see
-`{ session: null, user: null }` on a fresh browser.
+**Verifica:** aggiungi temporaneamente `console.log(await event.locals.safeGetSession())` — con un
+browser pulito dovresti vedere `{ session: null, user: null }`.
 
 ---
 
-### Step 4 — Type the locals (`src/app.d.ts`)
+### Step 4 — Tipizzare i locals (`src/app.d.ts`)
 
 ~~~ts
 import type { SupabaseClient, Session, User } from '@supabase/supabase-js';
@@ -228,16 +233,16 @@ declare global {
 export {};
 ~~~
 
-*Why:* `svelte-check` and your editor will now autocomplete `locals.user` and flag typos. The shape
-matches `webapp/src/app.d.ts`.
+*Perché:* adesso `svelte-check` e l'editor ti completano `locals.user` e segnalano i refusi. La forma
+corrisponde a quella di `webapp/src/app.d.ts`.
 
-**Verify:** `npm run check`.
+**Verifica:** `npm run check`.
 
 ---
 
-### Step 5 — Expose the session to every page
+### Step 5 — Rendere la sessione disponibile a ogni pagina
 
-**5a. Server layout data — `src/routes/+layout.server.ts`**
+**5a. Dati del layout lato server — `src/routes/+layout.server.ts`**
 
 ~~~ts
 import type { LayoutServerLoad } from './$types';
@@ -251,10 +256,10 @@ export const load: LayoutServerLoad = async ({ locals }) => {
 };
 ~~~
 
-*Why:* one place runs `safeGetSession` per navigation, every page and layout downstream can read
-`data.user`, and `locals.user` is populated for guards.
+*Perché:* `safeGetSession` viene chiamata in un solo punto per ogni navigazione, ogni pagina e ogni
+layout a valle può leggere `data.user`, e `locals.user` risulta popolato per i controlli di accesso.
 
-**5b. Client-side re-validation — `src/routes/+layout.ts`**
+**5b. Ri-validazione lato client — `src/routes/+layout.ts`**
 
 ~~~ts
 import type { LayoutLoad } from './$types';
@@ -265,10 +270,10 @@ export const load: LayoutLoad = async ({ data, depends }) => {
 };
 ~~~
 
-*Why:* `depends('supabase:auth')` lets us re-run all `load` functions when the auth state changes
-without a full page reload.
+*Perché:* `depends('supabase:auth')` ci permette di rieseguire tutte le funzioni `load` quando cambia
+lo stato di autenticazione, senza ricaricare l'intera pagina.
 
-**5c. Layout + navigation — `src/routes/+layout.svelte`**
+**5c. Layout e navigazione — `src/routes/+layout.svelte`**
 
 ~~~svelte
 <script lang="ts">
@@ -308,18 +313,20 @@ without a full page reload.
 {@render children()}
 ~~~
 
-*Why:* `onAuthStateChange` is the only reliable way to notice a token refresh or a sign-out that
-happened in another tab. Returning the unsubscribe function from `$effect` prevents listener leaks.
-Never call Supabase methods *inside* the callback — set state and let `invalidate` re-run the loads.
+*Perché:* `onAuthStateChange` è l'unico modo affidabile per accorgersi di un refresh del token o di un
+logout avvenuto in un'altra scheda. Restituire la funzione di unsubscribe dall'`$effect` evita listener
+che restano in memoria. Non chiamare mai metodi Supabase *dentro* il callback — imposta lo stato e lascia
+che `invalidate` riesegua i `load`.
 
-> If you keep the existing `temp/src/routes/+layout.svelte` untouched and drop the `supabaseBrowserClient`
-> import, everything in Steps 6–10 still works; you only lose the "another tab logged out" refresh.
+> Se preferisci lasciare intatto l'attuale `temp/src/routes/+layout.svelte` e togliere l'import di
+> `supabaseBrowserClient`, tutto quanto descritto negli Step 6–10 continua a funzionare; perdi solo il
+> refresh quando un'altra scheda fa logout.
 
-**Verify:** browse around; with no session the nav shows "Log in".
+**Verifica:** naviga l'app; senza sessione la nav mostra "Log in".
 
 ---
 
-### Step 6 — Login form backed by a server action
+### Step 6 — Form di login basato su una server action
 
 **`src/routes/login/+page.server.ts`**
 
@@ -352,17 +359,17 @@ export const actions: Actions = {
 };
 ~~~
 
-*Why a server action instead of `supabase.auth.signInWithPassword()` in the browser?*
-- It works before/without JavaScript (progressive enhancement).
-- The cookie is written by the server helper in `setAll`, so there is no "flash of unauthenticated
-  content" while the client library boots.
-- Validation errors come back as `form.message`, which is trivial to render.
+*Perché una server action invece di `supabase.auth.signInWithPassword()` nel browser?*
+- Funziona prima e anche senza JavaScript (progressive enhancement).
+- Il cookie viene scritto dall'helper server dentro `setAll`, quindi non c'è il "lampo" di contenuto
+  non autenticato mentre la libreria client si avvia.
+- Gli errori di validazione tornano come `form.message`, banali da mostrare.
 
-*Two traps:*
-1. `redirect()` and `fail()` **throw**. Never call them inside a `try/catch` that swallows errors —
-   or if you must, re-throw with `isRedirect(e)` / `isHttpError(e)`.
-2. `redirectTo` comes from the query string, so it must be validated (otherwise it is an open
-   redirect). The tiny check above, or the reusable helper in Step 10a.
+*Due trappole:*
+1. `redirect()` e `fail()` **lanciano un'eccezione**. Non chiamarli mai dentro un `try/catch` che
+   inghiotte gli errori — oppure, se devi farlo, rilanciali con `isRedirect(e)` / `isHttpError(e)`.
+2. `redirectTo` arriva dalla query string, quindi va validato (altrimenti è un open redirect). Basta il
+   controllo minimo qui sopra, o l'helper riutilizzabile dello Step 10a.
 
 **`src/routes/login/+page.svelte`**
 
@@ -391,15 +398,16 @@ export const actions: Actions = {
 <p>No account? <a href="/register">Sign up</a></p>
 ~~~
 
-*Why:* `use:enhance` upgrades the plain HTML form to a fetch-based submit with loading state, while
-the form still works with JS disabled. `autocomplete` attributes let browser password managers fill
-and save credentials correctly. `role="alert"` announces errors to screen readers.
+*Perché:* `use:enhance` trasforma un normale form HTML in un submit via fetch, con stato di caricamento,
+ma il form continua a funzionare anche con JavaScript disattivato. Gli attributi `autocomplete` fanno
+sì che i gestori di password del browser compilino e salvino le credenziali correttamente. `role="alert"`
+annuncia gli errori agli screen reader.
 
 ---
 
-### Step 7 — Registration
+### Step 7 — Registrazione
 
-Registration is the same shape as login, with `auth.signUp`:
+La registrazione ha la stessa forma del login, con `auth.signUp`:
 
 ~~~ts
 import { fail } from '@sveltejs/kit';
@@ -441,16 +449,16 @@ export const actions: Actions = {
 };
 ~~~
 
-*Why this differs from login:*
-- **Do not redirect to a protected route here.** With email confirmation on, `data.session` is `null`
-  and `data.user` exists but is unconfirmed; a redirect would immediately bounce the user back with
+*Perché qui è diverso dal login:*
+- **Non reindirizzare a una route protetta.** Con la conferma email attiva, `data.session` è `null` e
+  `data.user` esiste ma non è confermato; un redirect rimbalzerebbe subito l'utente indietro con il
   `redirectTo`.
-- **The same page must render three states**: untouched, error, and "check your inbox". A single
-  `form.message` plus a conditional block is enough.
-- A minimal password-length check server-side is worth having even though Supabase also enforces a
-  minimum — it gives a readable message in your own UI language.
+- **La stessa pagina deve gestire tre stati**: iniziale, errore e "controlla la casella di posta". Bastano
+  un `form.message` e un blocco condizionale.
+- Un controllo minimo sulla lunghezza della password lato server vale la pena anche se Supabase impone
+  già un minimo — ti permette di mostrare un messaggio leggibile nella lingua della tua UI.
 
-The matching `+page.svelte` only needs the extra fields and the conditional:
+Alla `+page.svelte` corrispondente servono solo i campi aggiuntivi e il blocco condizionale:
 
 ~~~svelte
 {#if form?.message}
@@ -458,8 +466,9 @@ The matching `+page.svelte` only needs the extra fields and the conditional:
 {/if}
 ~~~
 
-*Why `auth.signUp` and not the admin API:* the admin `createUser` endpoint requires the `service_role`
-key, which must never be reachable from a public route. Self-service sign-up is the only option here.
+*Perché `auth.signUp` e non l'API di amministrazione:* l'endpoint admin `createUser` richiede la chiave
+`service_role`, che non deve mai essere raggiungibile da una route pubblica. La registrazione self-service
+è l'unica opzione sensata qui.
 
 ---
 
@@ -475,19 +484,19 @@ export const POST: RequestHandler = async ({ locals }) => {
 };
 ~~~
 
-*Why POST and not GET:* a GET logout can be triggered by any `<img src>` on any site (CSRF-ish
-annoyance). The nav form in Step 5c already posts.
+*Perché POST e non GET:* un logout via GET può essere innescato da un qualsiasi `<img src>` su un sito
+qualunque (una seccatura in stile CSRF). Il form nella nav dello Step 5c usa già POST.
 
 ---
 
-### Step 9 — Email confirmation (dashboard + `/auth/confirm`)
+### Step 9 — Conferma email (dashboard + `/auth/confirm`)
 
-**9a. Supabase dashboard**
-- *Auth → Providers → Email*: keep "Confirm email" on.
-- *Auth → URL Configuration*: **Site URL** = your dev URL (`http://localhost:5173`), and add
-  **Redirect URLs** for `http://localhost:5173/**` and your production origin `https://…/**`.
-  Anything not allowlisted silently falls back to the Site URL.
-- *Auth → Email Templates → Confirm sign up*: point the link at your own route:
+**9a. Dashboard Supabase**
+- *Auth → Providers → Email*: lascia attiva la conferma email.
+- *Auth → URL Configuration*: **Site URL** = il tuo URL di sviluppo (`http://localhost:5173`), e aggiungi
+  nelle **Redirect URLs** sia `http://localhost:5173/**` sia l'origine di produzione `https://…/**`.
+  Qualunque URL non presente in allowlist ricade silenziosamente sulla Site URL.
+- *Auth → Email Templates → Confirm sign up*: punta il link verso una tua route:
 
 ~~~html
 <a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=email&next=/account">
@@ -495,10 +504,10 @@ annoyance). The nav form in Step 5c already posts.
 </a>
 ~~~
 
-*Why `token_hash` and not the default `{{ .ConfirmationURL }}`:* the default link goes to Supabase,
-which then bounces back with `?code=`; if the user opens it on a different device than the one that
-signed up, the PKCE code verifier is missing and the exchange fails. The `token_hash` flow works on
-any device.
+*Perché `token_hash` e non il `{{ .ConfirmationURL }}` predefinito:* il link predefinito passa da Supabase,
+che poi rimbalza indietro con `?code=`; se l'utente apre il link da un dispositivo diverso da quello con
+cui si è registrato, manca il code verifier PKCE e lo scambio fallisce. Il flusso con `token_hash` funziona
+da qualsiasi dispositivo.
 
 **9b. `src/routes/auth/confirm/+server.ts`**
 
@@ -524,8 +533,8 @@ export const GET: RequestHandler = async ({ url, locals }) => {
 };
 ~~~
 
-*Note:* `verifyOtp` also supports `type: 'recovery'` (password reset) and `'magiclink'`. Add a
-`/auth/error` page with a friendly message and a "resend" link:
+*Nota:* `verifyOtp` supporta anche `type: 'recovery'` (reset password) e `'magiclink'`. Aggiungi una
+pagina `/auth/error` con un messaggio chiaro e un link per richiedere di nuovo l'email:
 
 ~~~svelte
 <!-- src/routes/auth/error/+page.svelte -->
@@ -533,13 +542,13 @@ export const GET: RequestHandler = async ({ url, locals }) => {
 <p>Richiedi di nuovo l'email di conferma oppure <a href="/login">accedi</a>.</p>
 ~~~
 
-**Verify:** sign up with a real inbox, click the link, land on `/account` logged in.
+**Verifica:** registrati con una casella reale, clicca il link e atterra su `/account` già autenticato.
 
 ---
 
-### Step 10 — Protecting routes
+### Step 10 — Proteggere le route
 
-**10a. The shared open-redirect guard — `src/lib/supabase/redirect.ts`**
+**10a. L'helper condiviso contro gli open redirect — `src/lib/supabase/redirect.ts`**
 
 ~~~ts
 export function safeRedirect(target: string | null | undefined, fallback = '/'): string {
@@ -549,13 +558,14 @@ export function safeRedirect(target: string | null | undefined, fallback = '/'):
 }
 ~~~
 
-*Why:* `redirectTo` / `next` arrive from the query string or a hidden field, so any of them can be
-`//evil.com`. Centralizing the check means the rule cannot drift between the login action, the confirm
-endpoint and the guards. It is also tiny and unit-testable with the Vitest setup you already have.
+*Perché:* `redirectTo` e `next` arrivano dalla query string o da un campo nascosto, quindi possono
+contenere `//evil.com`. Centralizzare il controllo significa che la regola non può divergere tra l'azione
+di login, l'endpoint di conferma e i guard. Inoltre è una funzione minuscola e testabile con Vitest, che
+hai già configurato.
 
-**10b. Option A — guard a route group (recommended for A4).**
+**10b. Opzione A — proteggere un gruppo di route (consigliata per A4).**
 
-Move the private pages into a group and guard once:
+Sposta le pagine private in un gruppo e proteggile in un punto solo:
 
 ~~~ts
 // src/routes/(private)/+layout.server.ts
@@ -577,14 +587,15 @@ export const load: LayoutServerLoad = async ({ locals, url }) => {
 };
 ~~~
 
-`src/routes/(private)/account/+page.svelte` then simply renders `data.user.email`; the parent layout
-would not have rendered if there were no user. Group folders with parentheses do not appear in URLs.
+A quel punto `src/routes/(private)/account/+page.svelte` si limita a mostrare `data.user.email`; il layout
+padre non sarebbe stato renderizzato se non ci fosse stato un utente. Le cartelle di gruppo tra parentesi
+non compaiono nell'URL.
 
-**10c. Guarding the video room — `src/routes/stanza/[nome]/+page.server.ts`**
+**10c. Proteggere la stanza video — `src/routes/stanza/[nome]/+page.server.ts`**
 
-Fase 1 of `piano.md` requires `/stanza/[nome]` to be reachable only by authenticated users, and the
-room name to be valid. That guard is *not* the token endpoint's job alone: a user who can load the
-pre-join page with an invalid name gets a confusing failure later.
+La Fase 1 di `piano.md` richiede che `/stanza/[nome]` sia raggiungibile solo da utenti autenticati e che
+il nome della stanza sia valido. Questo controllo *non* è compito del solo endpoint del token: un utente
+che riesce ad aprire la pagina pre-join con un nome non valido ottiene un errore confuso più tardi.
 
 ~~~ts
 import { error, redirect } from '@sveltejs/kit';
@@ -609,12 +620,12 @@ export const load: PageServerLoad = async ({ locals, params, url }) => {
 };
 ~~~
 
-*Why 404 and not 400:* a malformed room name is indistinguishable from a non-existent one as far as
-the visitor is concerned, and 404 keeps the information surface small. `src/lib/rooms.ts` already
-exists in `webapp/`; copy it into `temp/src/lib/` rather than inlining the regex, so the token endpoint
-and the page validate with the *same* rule.
+*Perché 404 e non 400:* per chi visita il sito un nome stanza malformato è indistinguibile da uno
+inesistente, e il 404 riduce la superficie informativa. `src/lib/rooms.ts` esiste già in `webapp/`:
+copialo in `temp/src/lib/` invece di scrivere la regex a mano, così l'endpoint del token e la pagina
+validano con la *stessa* regola.
 
-**10d. Option B — centralized check in `hooks.server.ts`** (only if almost everything becomes private):
+**10d. Opzione B — controllo centralizzato in `hooks.server.ts`** (solo se quasi tutto diventa privato):
 
 ~~~ts
 const PUBLIC_PATHS = ['/login', '/register', '/auth'];
@@ -627,18 +638,18 @@ if (!user && !isPublic(event.url.pathname) && !event.url.pathname.startsWith('/a
 }
 ~~~
 
-*Why A is usually better:* the guard lives next to the pages it protects, and it does not need a
-hand-maintained allowlist that can drift. Option B is also a sledgehammer for API routes — remember
-that `redirect(303, '/login')` is the wrong answer for a JSON endpoint; there you want
+*Perché di solito A è meglio:* il controllo vive accanto alle pagine che protegge e non richiede una
+allowlist mantenuta a mano che può andare fuori sincrono. L'opzione B è anche una mazzata per le route
+API — ricorda che `redirect(303, '/login')` è la risposta sbagliata per un endpoint JSON; lì vuoi
 `error(401, 'not authenticated')`.
 
 ---
 
-### Step 11 — Teach the LiveKit token endpoint about the user
+### Step 11 — Insegnare all'endpoint del token LiveKit chi è l'utente
 
-Your `temp/.env.example` already carries `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`, so
-when `src/routes/api/token/+server.ts` is written (Fase 2 of `piano.md`), it must derive the identity
-from the session:
+Il tuo `temp/.env.example` contiene già `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`, quindi
+quando scriverai `src/routes/api/token/+server.ts` (Fase 2 di `piano.md`) dovrà ricavare l'identità dalla
+sessione:
 
 ~~~ts
 import { error, json } from '@sveltejs/kit';
@@ -668,17 +679,18 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 };
 ~~~
 
-*Why:* the LiveKit access token grants publish/subscribe rights. If `identity` came from the request
-body, any logged-in user could impersonate another participant. `room` *does* legitimately come from
-the client (the user picked it), but it must be validated and, once you have a database, checked
-against a membership table. The `webapp/src/routes/api/token/+server.ts` endpoint is the reference
-pattern. Keep the TTL short (minutes, not hours) and let the client re-request.
+*Perché:* il token di accesso LiveKit concede i diritti di pubblicazione e sottoscrizione. Se `identity`
+arrivasse dal body della richiesta, qualunque utente autenticato potrebbe impersonare un altro
+partecipante. La stanza invece *può* legittimamente arrivare dal client (è l'utente che l'ha scelta), ma
+va validata e, quando avrai un database, verificata contro una tabella di appartenenza. L'endpoint
+`webapp/src/routes/api/token/+server.ts` è il pattern di riferimento. Tieni la scadenza breve (minuti,
+non ore) e lascia che il client ne richieda uno nuovo.
 
 ---
 
-### Step 12 — Tests and checks
+### Step 12 — Test e controlli
 
-1. **Unit (Vitest, already configured in `temp/`)** — `src/lib/supabase/redirect.spec.ts`:
+1. **Unit (Vitest, già configurato in `temp/`)** — `src/lib/supabase/redirect.spec.ts`:
 
 ~~~ts
 import { describe, expect, it } from 'vitest';
@@ -692,124 +704,122 @@ describe('safeRedirect', () => {
 });
 ~~~
 
-   Same treatment for `isValidRoomName` once `src/lib/rooms.ts` is copied over.
-2. **E2E (Playwright, already configured)** — two cheap tests with a dedicated test user:
-   - unauthenticated `page.goto('/account')` ends on `/login?redirectTo=%2Faccount`;
-   - fill the login form, submit, expect the account heading and a session cookie.
-   Keep the credentials in `.env.test`/CI secrets, and use a seeded user, not your personal account.
-   Email confirmation cannot be scripted in a normal E2E run — seed the user as "already confirmed"
-   through the Supabase dashboard or an admin script.
+   Lo stesso trattamento vale per `isValidRoomName` una volta copiato `src/lib/rooms.ts`.
+2. **E2E (Playwright, già configurato)** — due test economici con un utente dedicato ai test:
+   - da non autenticato, `page.goto('/account')` termina su `/login?redirectTo=%2Faccount`;
+   - compila il form di login, invia, e verifica l'intestazione della pagina account e il cookie di sessione.
+   Tieni le credenziali in `.env.test`/nei secret della CI e usa un utente seed, non il tuo account
+   personale. La conferma email non è automatizzabile in un normale run E2E — crea l'utente di test già
+   confermato dalla dashboard Supabase o tramite uno script di amministrazione.
 3. `npm run check && npm run lint && npm run test`.
 
 ---
 
-## 3. File checklist
+## 3. Checklist dei file
 
-| File | Action | Purpose |
+| File | Azione | Scopo |
 |---|---|---|
-| `temp/package.json` | edit | add `@supabase/supabase-js`, `@supabase/ssr` |
-| `temp/.env.local` | new (ignored) | local Supabase URL + publishable key |
-| `temp/.env.example` | exists | already lists both `PUBLIC_SUPABASE_*` vars |
-| `temp/src/lib/supabase/env.ts` | new | fail-fast env exports |
-| `temp/src/lib/supabase/client.ts` | new | singleton browser client |
-| `temp/src/lib/supabase/redirect.ts` | new | open-redirect sanitizer |
-| `temp/src/lib/rooms.ts` | copy from `webapp/` | shared room-name validation |
-| `temp/src/hooks.server.ts` | new | per-request server client, `safeGetSession`, header passthrough |
-| `temp/src/app.d.ts` | edit | `App.Locals` / `App.PageData` types |
-| `temp/src/routes/+layout.server.ts` | new | session/user for every page |
-| `temp/src/routes/+layout.ts` | new | `depends('supabase:auth')` |
-| `temp/src/routes/+layout.svelte` | edit | auth listener + nav |
-| `temp/src/routes/login/+page.server.ts` | new | login action |
-| `temp/src/routes/login/+page.svelte` | new | login form |
-| `temp/src/routes/register/+page.server.ts` + `.svelte` | new | sign up + "check your inbox" state |
-| `temp/src/routes/logout/+server.ts` | new | POST sign-out |
-| `temp/src/routes/auth/confirm/+server.ts` | new | `verifyOtp` for email links |
-| `temp/src/routes/auth/error/+page.svelte` | new | failed-link page |
-| `temp/src/routes/(private)/+layout.server.ts` | new | route-group guard |
-| `temp/src/routes/(private)/account/+page.svelte` | new | protected page example |
-| `temp/src/routes/stanza/[nome]/+page.server.ts` | new | auth + room-name guard, `displayName` |
-| `temp/src/routes/stanza/[nome]/+page.svelte` | edit | pre-join, reads `data.displayName` |
-| `temp/src/routes/api/token/+server.ts` | new/edit | derive identity from `locals.user` |
-| `temp/src/lib/supabase/redirect.spec.ts` | new | unit test |
-| `temp/e2e/auth.spec.ts` (or `*.e2e.ts` beside the route) | new | login + guard tests |
+| `temp/package.json` | modificare | aggiungere `@supabase/supabase-js`, `@supabase/ssr` |
+| `temp/.env.local` | nuovo (ignorato) | URL Supabase locale + publishable key |
+| `temp/.env.example` | esiste già | elenca già entrambe le variabili `PUBLIC_SUPABASE_*` |
+| `temp/src/lib/supabase/env.ts` | nuovo | export delle variabili d'ambiente con fail-fast |
+| `temp/src/lib/supabase/client.ts` | nuovo | client browser singleton |
+| `temp/src/lib/supabase/redirect.ts` | nuovo | sanitizzatore per gli open redirect |
+| `temp/src/lib/rooms.ts` | copiare da `webapp/` | validazione condivisa del nome stanza |
+| `temp/src/hooks.server.ts` | nuovo | client server per richiesta, `safeGetSession`, passthrough degli header |
+| `temp/src/app.d.ts` | modificare | tipi `App.Locals` / `App.PageData` |
+| `temp/src/routes/+layout.server.ts` | nuovo | sessione/utente per ogni pagina |
+| `temp/src/routes/+layout.ts` | nuovo | `depends('supabase:auth')` |
+| `temp/src/routes/+layout.svelte` | modificare | listener di autenticazione + nav |
+| `temp/src/routes/login/+page.server.ts` | nuovo | action di login |
+| `temp/src/routes/login/+page.svelte` | nuovo | form di login |
+| `temp/src/routes/register/+page.server.ts` + `.svelte` | nuovi | registrazione + stato "check your inbox" |
+| `temp/src/routes/logout/+server.ts` | nuovo | sign-out via POST |
+| `temp/src/routes/auth/confirm/+server.ts` | nuovo | `verifyOtp` per i link email |
+| `temp/src/routes/auth/error/+page.svelte` | nuovo | pagina per link fallito |
+| `temp/src/routes/(private)/+layout.server.ts` | nuovo | guard del gruppo di route |
+| `temp/src/routes/(private)/account/+page.svelte` | nuovo | esempio di pagina protetta |
+| `temp/src/routes/stanza/[nome]/+page.server.ts` | nuovo | guard auth + nome stanza, `displayName` |
+| `temp/src/routes/stanza/[nome]/+page.svelte` | modificare | pre-join, legge `data.displayName` |
+| `temp/src/routes/api/token/+server.ts` | nuovo/modificare | ricava l'identità da `locals.user` |
+| `temp/src/lib/supabase/redirect.spec.ts` | nuovo | test unitario |
+| `temp/e2e/auth.spec.ts` (o `*.e2e.ts` accanto alla route) | nuovo | test di login e guard |
 
 ---
 
-## 4. Suggested order of work (each step ends in a verifiable state)
+## 4. Ordine di lavoro consigliato (ogni passo termina in uno stato verificabile)
 
-1. Step 1 + Step 2 — deps, env, browser client. App still boots.
-2. Step 3 + Step 4 — hooks + types. `safeGetSession()` returns `null`s; `npm run check` is clean.
-3. Step 5 — layout wiring. Nav renders the logged-out state.
-4. Step 6 + Step 8 — login form and logout. You can log in and out. **First usable milestone.**
-5. Step 7 + Step 9 — registration and email confirmation. Sign-up round trip works end to end.
-6. Step 10 — `safeRedirect` + `(private)` group + `/stanza/[nome]` guard, plus the unit tests.
-7. Step 11 — the LiveKit token endpoint, now that identity is trustworthy.
-8. Step 12 — Playwright coverage, then `check` / `lint` / `test`.
+1. Step 1 + Step 2 — dipendenze, variabili d'ambiente, client browser. L'app parte ancora.
+2. Step 3 + Step 4 — hooks e tipi. `safeGetSession()` restituisce `null`; `npm run check` è pulito.
+3. Step 5 — collegamento del layout. La nav mostra lo stato da non autenticato.
+4. Step 6 + Step 8 — form di login e logout. Sai accedere e uscire. **Prima milestone utilizzabile.**
+5. Step 7 + Step 9 — registrazione e conferma email. Il giro completo di iscrizione funziona.
+6. Step 10 — `safeRedirect` + gruppo `(private)` + guard su `/stanza/[nome]`, più i test unitari.
+7. Step 11 — l'endpoint del token LiveKit, ora che l'identità è affidabile.
+8. Step 12 — copertura Playwright, poi `check` / `lint` / `test`.
 
-Steps 6 and 9 can be swapped if you would rather have real sign-ups before a polished login page.
-
----
-
-## 5. Pitfalls cheat-sheet
-
-- **`getSession()` ≠ authorization.** Anyone can forge a cookie; only `getUser()`/`getClaims()` validate.
-- **Never instantiate the server client at module scope** — it must be per-request.
-- **Never call `redirect()`/`fail()` inside a `try` whose `catch` swallows them** (use `isRedirect`).
-- **Don't create a second browser client** in another component.
-- **Don't gate on `session.user` client-side only** and assume the data behind it is protected.
-- **Redirect URLs must be allowlisted** in the dashboard, otherwise confirmation links fall back to Site URL.
-- **`@supabase/ssr` cookie API changed** (`getAll`/`setAll` now); if a tutorial passes `cookieOptions`, it is old.
-- **Set `secure` cookies in production** — the defaults from Supabase are fine, but if you copy cookie
-  options manually, don't drop `secure`/`sameSite`.
-- **Sign out server-side** so the cookie is actually cleared on the response.
-- **`$env/static/private`** (`LIVEKIT_API_SECRET`) can only be imported from server files — never from
-  a `+page.svelte` or a `$lib` module that a component imports.
-- **Don't put the LiveKit secret behind a `PUBLIC_` variable** while debugging; that is the one mistake
-  that leaks production credentials to every visitor.
+Gli Step 6 e 9 si possono invertire se preferisci avere prima le registrazioni reali e poi la pagina di
+login rifinita.
 
 ---
 
-## 6. Optional extensions (pick later)
+## 5. Errori tipici da evitare (riepilogo)
 
-- **Password reset**: `resetPasswordForEmail` + a `/auth/confirm?type=recovery` branch that sends the
-  user to a "set new password" page calling `updateUser({ password })`.
-- **OAuth (Google/GitHub)**: `/auth/callback/+server.ts` doing
-  `supabase.auth.exchangeCodeForSession(url.searchParams.get('code'))`, and a
-  `signInWithOAuth({ provider, options: { redirectTo: `${origin}/auth/callback` } })` button.
-- **Profile / display name**: a `profiles` table keyed by `auth.users.id`, written from a
-  `(private)/account` form; the token endpoint then reads the display name from there instead of
+- **`getSession()` non è autorizzazione.** Chiunque può falsificare un cookie; solo `getUser()`/`getClaims()` validano.
+- **Non istanziare mai il client server a livello di modulo** — deve essere creato per ogni richiesta.
+- **Non chiamare `redirect()`/`fail()` dentro un `try` il cui `catch` li inghiotte** (usa `isRedirect`).
+- **Non creare un secondo client browser** in un altro componente.
+- **Non basare il controllo solo su `session.user` lato client** e dare per scontato che i dati dietro siano protetti.
+- **Le Redirect URLs devono essere in allowlist** nella dashboard, altrimenti i link di conferma ricadono sulla Site URL.
+- **L'API cookie di `@supabase/ssr` è cambiata** (ora `getAll`/`setAll`); se un tutorial passa `cookieOptions`, è vecchio.
+- **Imposta cookie `secure` in produzione** — i default di Supabase vanno bene, ma se copi le opzioni dei cookie a mano non perdere `secure`/`sameSite`.
+- **Fai il sign-out lato server**, così il cookie viene davvero cancellato nella risposta.
+- **`$env/static/private`** (`LIVEKIT_API_SECRET`) si può importare solo da file server — mai da una `+page.svelte` o da un modulo `$lib` importato da un componente.
+- **Non mettere il secret di LiveKit dietro una variabile `PUBLIC_`** mentre fai debug; è l'errore che fa trapelare le credenziali di produzione a ogni visitatore.
+
+---
+
+## 6. Estensioni opzionali (da valutare in seguito)
+
+- **Reset password**: `resetPasswordForEmail` + un ramo `/auth/confirm?type=recovery` che porta l'utente a una pagina "imposta nuova password" che chiama `updateUser({ password })`.
+- **OAuth (Google/GitHub)**: `/auth/callback/+server.ts` che esegue
+  `supabase.auth.exchangeCodeForSession(url.searchParams.get('code'))`, e un pulsante
+  `signInWithOAuth({ provider, options: { redirectTo: `${origin}/auth/callback` } })`.
+- **Profilo / nome visualizzato**: una tabella `profiles` con chiave `auth.users.id`, scritta da un form in
+  `(private)/account`; a quel punto l'endpoint del token legge il nome visualizzato da lì invece che da
   `user_metadata`.
-- **Row Level Security**: once you store app data (rooms, participants), enable RLS on each table and
-  write policies against `auth.uid()`. Authentication without RLS is only half a story.
-- **Server-only admin actions**: a second client using the `service_role` key, created *only* inside
-  `$lib/server/` files (SvelteKit blocks `$lib/server` imports in client code).
-- **Rate limiting / captcha** on `/login` and `/register` before going public.
+- **Row Level Security**: quando inizierai a salvare dati applicativi (stanze, partecipanti), attiva la RLS
+  su ogni tabella e scrivi le policy rispetto a `auth.uid()`. L'autenticazione senza RLS è solo metà della storia.
+- **Azioni di amministrazione solo lato server**: un secondo client con la chiave `service_role`, creato
+  *solo* dentro file in `$lib/server/` (SvelteKit blocca gli import da `$lib/server` nel codice client).
+- **Rate limiting / captcha** su `/login` e `/register` prima di aprire al pubblico.
 
 ---
 
-## 7. Intentionally out of scope
+## 7. Fuori ambito, volutamente
 
-- **LiveKit room logic** (connect, tiles, controls, reconnect): covered by Fase 2–4 of `piano.md`, not here.
-  This document only replaces the "Autenticazione" bullet of Fase 1 with something actionable.
-- **Database schema and RLS policies**: there is no app data yet.
-- **Magic link / OTP / phone auth**: only the email-link confirmation flow is described.
-- **Tailwind styling of the auth pages**: the snippets are unstyled on purpose, so they do not fight
-  your `layout.css` / `@tailwindcss/forms` setup.
-- **Internationalization**: the auth error messages come from Supabase in English; mapping them to
-  Italian strings is a separate pass.
+- **La logica della stanza LiveKit** (connessione, tile, controlli, riconnessione): è coperta dalle Fasi 2–4
+  di `piano.md`, non qui. Questo documento sostituisce soltanto il bullet "Autenticazione" della Fase 1 con
+  qualcosa di operativo.
+- **Schema del database e policy RLS**: non ci sono ancora dati applicativi.
+- **Magic link / OTP / autenticazione via telefono**: viene descritto solo il flusso di conferma via link email.
+- **Stile Tailwind delle pagine di autenticazione**: gli snippet sono volutamente senza stile, per non
+  entrare in conflitto con il tuo `layout.css` / setup di `@tailwindcss/forms`.
+- **Internazionalizzazione**: i messaggi di errore di autenticazione arrivano da Supabase in inglese;
+  mapparli su stringhe italiane è un passaggio separato.
 
 ---
 
-## 8. Open questions for you
+## 8. Domande aperte
 
-1. **Deployment target** — `adapter-auto` is in `package.json`. On Vercel/Netlify the cookie handling
-   above is enough; on a Node server you may want `adapter-node` and to double-check `secure` cookies
-   behind a proxy. Which platform is it?
-2. **Registration open to everyone or invite-only?** If invite-only, `/register` should not be a public
-   route, and you will want an allowlist table rather than plain `signUp`.
-3. **Where do `(private)` pages end up?** Is `/account` the right name, or should everything private
-   live under `/stanza/*` only?
-4. **Display name at sign-up?** If you collect one, it belongs in `options.data` on `signUp` (→
-   `user_metadata`) or in a `profiles` row, and the token endpoint should use it (Step 11).
-5. **Do you also want the current `temp/src/routes/+layout.svelte` to keep its minimal shape** (no nav),
-   or should I plan the nav as part of this work? It currently renders only the favicon and the page.
+1. **Piattaforma di deploy** — in `package.json` c'è `adapter-auto`. Su Vercel/Netlify la gestione dei cookie
+   descritta sopra basta; su un server Node potresti volere `adapter-node` e ricontrollare i cookie `secure`
+   dietro un proxy. Qual è la piattaforma?
+2. **Registrazione aperta a tutti o solo su invito?** Se fosse solo su invito, `/register` non dovrebbe essere
+   una route pubblica e ti servirebbe una tabella di allowlist invece del semplice `signUp`.
+3. **Dove finiscono le pagine `(private)`?** Va bene il nome `/account`, o tutto il privato dovrebbe vivere
+   solo sotto `/stanza/*`?
+4. **Nome visualizzato in fase di registrazione?** Se lo raccogli, va in `options.data` di `signUp` (→
+   `user_metadata`) oppure in una riga della tabella `profiles`, e l'endpoint del token dovrebbe usarlo (Step 11).
+5. **Vuoi che l'attuale `temp/src/routes/+layout.svelte` mantenga la sua forma minimale** (senza nav), o
+   preferisci che la nav faccia parte di questo lavoro? Al momento renderizza solo la favicon e la pagina.
