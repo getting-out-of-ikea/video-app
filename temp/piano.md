@@ -1,3 +1,6 @@
+# Domanda iniziale a aider:
+ignora webapp nel repo, considera sol temp. Voglio scrivere l'autenticazione con Supabase in questa webapp. Le mie conoscenze di Typescript e HTMl sono iniziali. Ho bisogno che tu scriva in temp/piano.md un elenco di passi che devo seguire per realizzare l'autenticazione. Non scrivere tu il codice, ma scrivi degli snippet con relativa spiegazione. Vorrei usare fin da subito uno store. Se non hai domande procedi 
+
 # Piano di implementazione — Autenticazione con Supabase (SvelteKit + Svelte 5)
 
 > Questo documento è una guida passo-passo. Ogni passo ha:
