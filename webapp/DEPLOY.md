@@ -1,3 +1,7 @@
+# Domanda ad aider:
+scrivi in ./DEPLOY.md una lista di cose che servono per fare deploy su vercel di questa webapp, con il piano gratuito di vercel
+
+
 # Deploy su Vercel (piano gratuito Hobby)
 
 Checklist per pubblicare questa webapp (SvelteKit + Supabase + LiveKit) su Vercel con il piano **Hobby (gratuito)**.
