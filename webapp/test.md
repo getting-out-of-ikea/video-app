@@ -12,8 +12,10 @@ Stato attuale del progetto:
     ed esclude `src/lib/server/**`. Serve per i test dei **componenti Svelte**.
   - `server`: gira in ambiente Node, raccoglie `src/**/*.{test,spec}.{js,ts}` ed esclude
     `src/**/*.svelte.{test,spec}.{js,ts}`. Serve per i test di **funzioni pure e logica server**.
-- **Playwright** è configurato in `playwright.config.ts` (`testMatch: '**/*.e2e.{ts,js}'`,
-  avvia `npm run build && npm run preview` sulla porta 4173). Serve per i test **end-to-end**.
+- **Playwright** è configurato in `playwright.config.ts` (`testMatch: '**/*.e2e.{ts,js}'`, avvia
+  `npm run build && npm run preview` sulla porta 4173). Serve per i test **end-to-end**.
+  Come spiegato in §4, la webapp è già deployata su Vercel in un ambiente di sviluppo, quindi
+  l'intenzione è **puntare Playwright a quell'ambiente** invece di servire una build in locale.
 - Esistono già esempi "usa e getta" (`src/lib/vitest-examples/greet.spec.ts`,
   `Welcome.svelte.spec.ts`, `src/routes/demo/playwright/page.svelte.e2e.ts`) che si possono
   tenere come riferimento o rimuovere.
@@ -214,31 +216,85 @@ Per tutti questi test usiamo i fake Supabase (§0) e, dove serve, costruiamo `Re
 
 ## 4. End-to-end (Playwright)
 
-I test E2E verificano i flussi reali nel browser, contro un'app costruita e servita
-(`npm run build && npm run preview`). Sono pochi ma preziosi: copriamo i percorsi critici.
-Vanno scritti come `*.e2e.ts`.
+I test E2E verificano i flussi reali nel browser. **Decisione: i test girano contro la webapp
+già deployata su Vercel nell'ambiente di sviluppo** (il progetto Vercel usato come "staging"),
+non contro una build servita in locale.
 
-Decisione preliminare: **contro cosa gira l'app in E2E?** Ci sono due strade, con costi diversi:
+Questo cambia diverse cose rispetto a un setup "classico":
 
-- **(A) Integrazione reale**: progetto Supabase di test + progetto LiveKit di test, con
-  variabili d'ambiente dedicate (`.env.test` è già previsto dal `.gitignore`). Serve un
-  "global setup" Playwright che crea/elimina utenti di test (via Supabase Admin API) e forse
-  recupera i token. Più fedele, ma richiede credenziali in CI.
-- **(B) Ibrida**: usa Supabase di test per l'auth, ma mocka l'endpoint `/api/token` e le
-  componenti LiveKit tramite `page.route(...)` per non dipendere da un server LiveKit. Più
-  semplice ma non testa la parte video.
+- non serve più `webServer: { command: 'npm run build && npm run preview' }` in
+  `playwright.config.ts`: il server esiste già;
+- l'app è raggiunta via HTTPS (fornito da Vercel), quindi i permessi camera/microfono sono
+  concedibili senza i workaround tipici di `localhost`;
+- Supabase e LiveKit sono quelli **di sviluppo**: i test scrivono e leggono dati reali (utenti,
+  sessioni), quindi la gestione dei dati di test diventa una preoccupazione concreta (§4.2);
+- i test verificano **ciò che è già stato deployato**, non le modifiche non ancora committate:
+  per testare una modifica bisogna prima pushare (o fare un deploy manuale), il che rende
+  l'E2E un ciclo più lento del solito.
 
-In entrambi i casi, per WebRTC servono i flag Chromium
-`--use-fake-ui-for-media-stream` e `--use-fake-device-for-media-stream` (configurabili in
-`playwright.config.ts` nel blocco `use.launchOptions.args`), così camera e microfono sono
-"finti" e le permission sono auto-concesse.
+### 4.1 Configurazione del target
 
-Flussi da coprire:
+- Aggiungere una variabile d'ambiente (proposta: `E2E_BASE_URL`) con l'URL dell'ambiente di
+  sviluppo e usarla come `baseURL`; se non è impostata, fallback su `localhost` per uno smoke
+  test locale rapido.
+
+  ```ts
+  // playwright.config.ts
+  import { defineConfig } from '@playwright/test';
+
+  export default defineConfig({
+      use: {
+          baseURL: process.env.E2E_BASE_URL ?? 'http://localhost:4173'
+      },
+      testMatch: '**/*.e2e.{ts,js}'
+  });
+  ```
+
+- Due strategie per "quale URL":
+  - **Alias stabile**: un branch dedicato (es. `develop` o `staging`) con alias Vercel fisso
+    (es. `webapp-develop.vercel.app`). È l'URL da mettere in `E2E_BASE_URL` per i run manuali.
+    Comodo, ma l'app può cambiare sotto i piedi se qualcuno pusha durante il run.
+  - **Deployment specifico**: usare l'URL immutabile del singolo deploy per testare esattamente
+    quel commit. Deterministico, ideale in CI (§5), scomodo per i run manuali.
+
+### 4.2 Autenticazione e dati di test
+
+L'ambiente Vercel di sviluppo usa lo stesso progetto Supabase di sviluppo: gli account creati
+dai test restano lì. Opzioni, in ordine di preferenza:
+
+- **Account di test pre-creati e fissi.** Creare a mano (una volta) uno o due utenti in Supabase
+  dev e passarli via variabili (`E2E_USER_EMAIL`, `E2E_USER_PASSWORD`, salvate in `.env.test`,
+  già previsto dal `.gitignore`). I test fanno login/logout ma non accumulano nuovi utenti.
+- **Global setup con cleanup.** Uno script Playwright (`globalSetup`) che crea un utente via
+  Supabase Admin API (service role key, **mai** esposta al client), lo usa nei test e lo elimina
+  nel `globalTeardown`. Più isolato, ma richiede la service role key in CI e attenzione in caso
+  di run concorrenti.
+- **Signup "usa e getta" con email univoca** (`e2e+<timestamp>@...`): semplice, ma accumula
+  utenti in dev nel tempo: va prevista una pulizia periodica.
+
+Regole non negoziabili: **mai** puntare `E2E_BASE_URL` all'ambiente di produzione e **mai** usare
+credenziali di produzione.
+
+### 4.3 WebRTC e permessi
+
+Anche contro un'app servita in HTTPS servono i device "finti" di Chromium, altrimenti i test non
+hanno camera/microfono e i permessi restano da concedere:
+
+```ts
+// playwright.config.ts
+use: {
+    baseURL: process.env.E2E_BASE_URL,
+    launchOptions: {
+        args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream']
+    }
+}
+```
+
+### 4.4 Flussi da coprire
 
 - **Auth guard / redirect.**
   - visitando `/stanza/test-1` o `/account` da sloggati → si finisce su `/login`;
   - visitando `/login` da loggati → si finisce su `/`.
-
 - **Registrazione + login + logout.**
   - signup con email test (eventualmente con conferma email disattivata nel progetto di test)
     → redirect a `/`;
@@ -246,12 +302,10 @@ Flussi da coprire:
   - click su "Esci" → redirect a `/` e l'header torna a mostrare "Accedi";
   - login con credenziali errate → messaggio "Credenziali non valide.";
   - login corretto → `/`.
-
 - **Ciclo "password dimenticata".**
   - submit di `/password-reset` → messaggio generico;
   - (opzionale, se abbiamo accesso alla casella di test / a un endpoint di mail) verifica che il
     link generato atterri su `/auth/confirm?next=/account`.
-
 - **Stanza (`/stanza/[nome]`).**
   - nome valido `test-1` da utente loggato → si vede la schermata di pre-join con anteprima
     (grazie ai fake device);
@@ -260,10 +314,34 @@ Flussi da coprire:
     participant" e i controlli in basso; toggle microfono/camera cambiano l'etichetta
     ("Microfono attivo" ↔ "Microfono muto"); "Abbandona" riporta alla pre-join;
   - se `/api/token` risponde 401 → messaggio "Sessione scaduta...".
-
 - **Smoke test generale.** La home `/` risponde 200 e mostra "Welcome to SvelteKit" (o quello che
-  sarà), l'header è presente. È l'equivalente del test demo già esistente `page.svelte.e2e.ts`,
+  sarà) e l'header è presente. È l'equivalente del test demo già esistente `page.svelte.e2e.ts`,
   che si può tenere, spostare o eliminare.
+
+Nota sulla parte video: se l'ambiente di sviluppo ha un LiveKit funzionante, il flusso "Entra
+nella stanza" può essere testato end-to-end con i device finti. Se invece preferiamo non
+dipendere da un server LiveKit condiviso, si mocka `/api/token` con `page.route(...)` e ci si
+limita a verificare l'ingresso nella stanza e i controlli UI (come sopra).
+
+### 4.5 Precauzioni specifiche del target remoto
+
+- **Flakiness**: latenza di rete, cold start delle function e stato condiviso possono rendere i
+  test più instabili. Preferire attese esplicite (`expect(...).toBeVisible()`) a `waitForTimeout`,
+  e usare `retries` (solo in CI) con parsimonia.
+- **Parallelismo**: non lanciare più test E2E in parallelo sullo stesso ambiente con lo stesso
+  utente: le sessioni si invalidano a vicenda (un "Esci" sloggia l'altro test). O usare utenti
+  distinti per worker, o forzare `fullyParallel: false` / `workers: 1`.
+- **App che cambia durante il run**: sull'alias stabile un push altrui può cambiare l'app a metà
+  suite. In CI conviene puntare all'URL immutabile del deployment appena creato (§4.1).
+- **Configurazione locale**: aggiungere `E2E_BASE_URL` (e le credenziali di test) a `.env.test`
+  (già ignorato) e documentarle in `.env.example`, chiarendo che sono dati **di sviluppo**.
+
+### 4.6 Alternativa ibrida (facoltativa)
+
+Se l'E2E remoto dovesse rivelarsi lento o instabile, si può affiancare un secondo "project"
+Playwright che gira in locale contro `npm run build && npm run preview` con `/api/token` mockato
+via `page.route(...)`, per un feedback rapido prima del push. Il project remoto resta comunque
+quello "di verità" per l'integrazione end-to-end.
 
 ---
 
@@ -281,12 +359,12 @@ Dopo che le sezioni precedenti esistono, questa sezione si occupa di renderle so
   - `test:e2e:ui` → `playwright test --ui` (per debug locale),
   - `test:ci` → sequenza completa adatta alla pipeline.
 - **CI.** Se si usa GitHub Actions (o simile), descrivere il workflow: `npm ci`,
-  `npm run check` (svelte-check), `npm run lint`, `npm run test:unit`, `npm run test:e2e`
-  (con install dei browser Playwright e gestione dei segreti per Supabase/LiveKit di test, se
-  adottiamo l'opzione A in §4).
+  `npm run check` (svelte-check), `npm run lint`, `npm run test:unit`, poi `npm run test:e2e`
+  eseguito **dopo** il deploy Vercel, puntando (`E2E_BASE_URL`) all'URL immutabile del deployment
+  appena creato, con le credenziali di test passate come segreti (vedi §4.1 e §4.2).
 - **Convenzioni di manutenzione.** Documentare qui la scelta fatta in §0 su come si mockano
-  `$app/*`, Supabase e LiveKit, così chi aggiunge test in futuro riusa gli helper invece di
-  ricrearli.
+  `$app/*`, Supabase e LiveKit, e in §4 su come si punta l'ambiente remoto e si gestiscono i dati
+  di test, così chi aggiunge test in futuro riusa gli helper invece di ricrearli.
 
 ---
 
@@ -297,7 +375,7 @@ Dopo che le sezioni precedenti esistono, questa sezione si occupa di renderle so
 3. §3 Server-side (`hooks.server.ts`, `/api/token`, `/logout`, action di login/account/
    password-reset/auth-confirm) — è la parte con più valore, ma va fatta dopo §0.
 4. §2 Componenti Svelte (`ParticipantTile`, poi le pagine form/header).
-5. §4 End-to-end.
+5. §4 End-to-end (contro l'ambiente Vercel di sviluppo).
 6. §5 Copertura, CI e manutenzione.
 
 Quando vorrai procedere, dimmi ad esempio "implementa §0" oppure "implementa §0 e §1
