@@ -1,3 +1,6 @@
+# aider
+voglio implementare dei test per questa webapp. Scrivi un file test.md in cui indichi in maniera discorsiva cosa bisogna fare per ogni categoria di test, in modo che successivamente io possa chiederti di implementare una sezione per volta.
+
 # Piano dei test
 
 Questo documento descrive, categoria per categoria, cosa va fatto per testare la webapp.
