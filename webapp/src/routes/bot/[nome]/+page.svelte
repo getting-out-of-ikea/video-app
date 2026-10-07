@@ -5,8 +5,10 @@
 		ParticipantKind,
 		Room,
 		RoomEvent,
+		Track,
 		type Participant,
-		type RemoteParticipant
+		type RemoteParticipant,
+		type RemoteTrackPublication
 	} from 'livekit-client';
 	import { onDestroy, onMount } from 'svelte';
 	import type { PageData } from './$types';
@@ -51,6 +53,12 @@
 	let transcript = $state<TranscriptEntry[]>([]);
 	let transcriptEl = $state<HTMLDivElement>();
 
+	// Hidden container for the agent's audio. Subscribing to a remote track is
+	// not enough: LiveKit relies on the app to create a media element with
+	// `track.attach()` and append it, otherwise you see the transcript but
+	// hear nothing.
+	let audioContainer = $state<HTMLDivElement>();
+
 	onMount(() => {
 		requestMic();
 	});
@@ -67,6 +75,57 @@
 			transcriptEl.scrollTop = transcriptEl.scrollHeight;
 		}
 	});
+
+	// --- Remote audio tracks -----------------------------------------------
+
+	// track.sid -> element, so we can clean up per track on unsubscribe and
+	// wipe everything on disconnect.
+	const attachedAudio = new Map<string, HTMLMediaElement>();
+
+	function attachRemoteAudio(track: Track) {
+		if (!audioContainer) return;
+		// A track can be re-subscribed after a reconnection: don't attach twice.
+		if (attachedAudio.has(track.sid)) return;
+		const el = track.attach();
+		el.autoplay = true;
+		audioContainer.appendChild(el);
+		attachedAudio.set(track.sid, el);
+	}
+
+	function detachRemoteAudio(track: Track) {
+		const el = attachedAudio.get(track.sid);
+		if (!el) return;
+		el.pause();
+		track.detach(el);
+		el.remove();
+		attachedAudio.delete(track.sid);
+	}
+
+	function detachAllAudio() {
+		for (const el of attachedAudio.values()) {
+			el.pause();
+			el.remove();
+		}
+		attachedAudio.clear();
+	}
+
+	function onTrackSubscribed(
+		track: Track,
+		_publication: RemoteTrackPublication,
+		participant: RemoteParticipant
+	) {
+		if (track.kind !== Track.Kind.Audio) return;
+		// Never attach our own mic, or the user would hear themselves.
+		if (participant.isLocal) return;
+		attachRemoteAudio(track);
+	}
+
+	function onTrackUnsubscribed(track: Track) {
+		if (track.kind !== Track.Kind.Audio) return;
+		detachRemoteAudio(track);
+	}
+
+	// --- Pre-join ----------------------------------------------------------
 
 	/**
 	 * Ask for microphone permission before joining. We stop the stream right
@@ -120,6 +179,15 @@
 				// Joined anyway, without a microphone (permission denied or no device)
 			}
 
+			// The click that started the join is the user gesture browsers
+			// require before allowing play(). Resume playback up front so the
+			// agent's first reply is audible on strict autoplay policies too.
+			try {
+				await newRoom.startAudio();
+			} catch {
+				// Blocked — the user can still read the transcript.
+			}
+
 			syncLocalState();
 			syncAgent();
 			joined = true;
@@ -138,6 +206,8 @@
 			.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => {
 				connectionState = state;
 			})
+			.on(RoomEvent.TrackSubscribed, onTrackSubscribed)
+			.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed)
 			.on(RoomEvent.TrackMuted, syncLocalState)
 			.on(RoomEvent.TrackUnmuted, syncLocalState)
 			.on(RoomEvent.LocalTrackPublished, syncLocalState)
@@ -241,6 +311,7 @@
 	function onDisconnected() {
 		agentParticipant?.off(ParticipantEvent.AttributesChanged, onAgentAttributesChanged);
 		agentParticipant = undefined;
+		detachAllAudio();
 		room = undefined;
 		joined = false;
 		micOn = false;
@@ -257,6 +328,13 @@
 <svelte:head>
 	<title>Bot {data.nome} · VideoApp</title>
 </svelte:head>
+
+<!--
+  The agent's audio tracks are attached here (one <audio> element per
+  subscribed remote track). The container is intentionally at the top level
+  so it exists as soon as the component mounts, before `joined` becomes true.
+-->
+<div bind:this={audioContainer}></div>
 
 {#if !joined}
 	<div class="mx-auto max-w-lg px-4 py-12">
