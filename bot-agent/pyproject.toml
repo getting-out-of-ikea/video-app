@@ -11,7 +11,11 @@ dependencies = [
     "ctranslate2>=4.8.2",
     "faster-whisper>=1.2.1",
     "livekit>=1.1.20",
+    "livekit-agents>=1.2.0",
+    "livekit-plugins-openai>=1.2.0",
+    "livekit-plugins-silero>=1.2.0",
     "piper-tts>=1.8.0",
+    "python-dotenv>=1.0.0",
     "sounddevice>=0.5.6",
 ]
 

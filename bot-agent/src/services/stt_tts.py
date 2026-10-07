@@ -3,16 +3,22 @@
 import json
 import site
 
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.request import urlretrieve
 
 if TYPE_CHECKING:
     import numpy as np
+    from faster_whisper import WhisperModel
     from piper import PiperVoice
 
 
 FALLBACK_LANGUAGE = "en"
+
+# Sampling rate assumed only when a voice produces no audio at all.
+# Every Piper "medium" voice (i.e. all the defaults below) is 22050 Hz.
+FALLBACK_SAMPLE_RATE = 22050
 
 # Hugging Face repository hosting the official Piper voice models.
 # We resolve from the "main" branch rather than the "v1.0.0" tag because
@@ -75,6 +81,7 @@ def ensure_voice_model(voice_name: str) -> Path:
     return model_path
 
 
+@lru_cache(maxsize=8)
 def load_voice(model_path: Path) -> "PiperVoice":
     """Load a Piper voice, falling back to espeak phonemization if needed.
 
@@ -82,6 +89,9 @@ def load_voice(model_path: Path) -> "PiperVoice":
     versions newer than the latest release. Since those voices also ship an
     espeak voice in their config, we patch the cached config to use espeak
     instead of failing. Returns the loaded voice.
+
+    Results are cached: the .onnx model is large, and both the CLI and the
+    LiveKit worker synthesise many phrases against the same voice.
     """
     from piper import PiperVoice
 
@@ -103,6 +113,61 @@ def load_voice(model_path: Path) -> "PiperVoice":
     return PiperVoice.load(model_path)
 
 
+def get_voice(language: str, voice: str | None = None) -> "PiperVoice":
+    """Return the Piper voice to use for `language`.
+
+    If `voice` (a Piper voice name like "it_IT-paola-medium") is given, it
+    overrides the default voice for the language. The model is downloaded on
+    first use and cached, so repeated calls are cheap.
+    """
+    voice_name = voice or DEFAULT_VOICES.get(language, DEFAULT_VOICES[FALLBACK_LANGUAGE])
+    return load_voice(ensure_voice_model(voice_name))
+
+
+def synthesize_pcm(
+    text: str,
+    language: str,
+    voice: str | None = None,
+    speed: float = 0.7,
+) -> "tuple[np.ndarray, int]":
+    """Synthesise `text` and return the raw audio instead of playing it.
+
+    Returns a ``(samples, sample_rate)`` pair: `samples` is a NumPy ``int16``
+    array (mono, or shaped ``(n, channels)`` for multi-channel voices) and
+    `sample_rate` is the rate the voice was rendered at. Use this when the
+    audio has to be forwarded somewhere (a LiveKit room, a socket, a file)
+    rather than played through the local speakers. See text_to_speech() for
+    playback, and note the two share the same voice selection and caching.
+    """
+    # Imported lazily: piper and numpy are heavy and only needed here.
+    import numpy as np
+    from piper.config import SynthesisConfig
+
+    if speed <= 0:
+        raise ValueError("speed must be a positive number")
+
+    piper_voice = get_voice(language, voice)
+    # Piper controls speed via length_scale: > 1 is slower, < 1 is faster.
+    syn_config = SynthesisConfig(length_scale=1.0 / speed)
+
+    chunks = []
+    sample_rate = None
+    channels = 1
+    for chunk in piper_voice.synthesize(text, syn_config=syn_config):
+        if sample_rate is None:
+            sample_rate = chunk.sample_rate
+            channels = chunk.sample_channels
+        chunks.append(np.frombuffer(chunk.audio_int16_bytes, dtype=np.int16))
+
+    if not chunks or sample_rate is None:
+        return np.zeros(0, dtype=np.int16), FALLBACK_SAMPLE_RATE
+
+    audio = np.concatenate(chunks)
+    if channels > 1:
+        audio = audio.reshape(-1, channels)
+    return audio, sample_rate
+
+
 def text_to_speech(
     text: str,
     language: str,
@@ -118,40 +183,24 @@ def text_to_speech(
     2.0 is twice as fast, 0.5 is half speed. The whole utterance is played
     back through the speakers; no file is saved.
     """
-    # Imported lazily: piper and sounddevice are heavy and only needed here.
-    import numpy as np
+    # Imported lazily: sounddevice is only needed for local playback.
     import sounddevice as sd
-    from piper.config import SynthesisConfig
 
-    if speed <= 0:
-        raise ValueError("speed must be a positive number")
-
-    voice_name = voice or DEFAULT_VOICES.get(language, DEFAULT_VOICES[FALLBACK_LANGUAGE])
-    # print(f"Language: {language} (voice: {voice_name})")
-    piper_voice = load_voice(ensure_voice_model(voice_name))
-    # Piper controls speed via length_scale: > 1 is slower, < 1 is faster.
-    syn_config = SynthesisConfig(length_scale=1.0 / speed)
-    # Collect the whole utterance first and play it in a single blocking
-    # call. sd.wait() only returns once every sample has been played, so
-    # short phrases are not truncated; closing an output stream right after
-    # the last write used to drop the trailing audio still sitting in the
-    # PortAudio buffer.
-    chunks = []
-    sample_rate = None
-    channels = 1
-    for chunk in piper_voice.synthesize(text, syn_config=syn_config):
-        if sample_rate is None:
-            sample_rate = chunk.sample_rate
-            channels = chunk.sample_channels
-        chunks.append(np.frombuffer(chunk.audio_int16_bytes, dtype=np.int16))
-    if not chunks or sample_rate is None:
+    audio, sample_rate = synthesize_pcm(text, language, voice=voice, speed=speed)
+    if audio.size == 0:
         return language
-    audio = np.concatenate(chunks)
-    if channels > 1:
-        audio = audio.reshape(-1, channels)
+    # Play the whole utterance in a single blocking call. sd.wait() only
+    # returns once every sample has been played, so short phrases are not
+    # truncated; closing an output stream right after the last write used to
+    # drop the trailing audio still sitting in the PortAudio buffer.
     sd.play(audio, samplerate=sample_rate)
     sd.wait()
     return language
+
+
+# Guards preload_nvidia_libraries() so the CUDA libraries are dlopen()ed at
+# most once per process, however many transcriptions run.
+_nvidia_libraries_preloaded = False
 
 
 def preload_nvidia_libraries() -> None:
@@ -164,6 +213,10 @@ def preload_nvidia_libraries() -> None:
     makes them findable. Must be called before the first CTranslate2 model
     is created.
     """
+    global _nvidia_libraries_preloaded
+    if _nvidia_libraries_preloaded:
+        return
+
     import ctypes
 
     lib_dirs = []
@@ -181,6 +234,7 @@ def preload_nvidia_libraries() -> None:
                     ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
                 except OSError:
                     pass
+    _nvidia_libraries_preloaded = True
 
 
 def detect_whisper_device() -> tuple[str, str]:
@@ -196,6 +250,31 @@ def detect_whisper_device() -> tuple[str, str]:
     return "cpu", "int8"
 
 
+@lru_cache(maxsize=4)
+def _load_whisper_model(
+    model_size: str, device: str, compute_type: str
+) -> "WhisperModel":
+    from faster_whisper import WhisperModel
+
+    return WhisperModel(model_size, device=device, compute_type=compute_type)
+
+
+def get_whisper_model(model_size: str = "base", device: str | None = None) -> "WhisperModel":
+    """Return a cached WhisperModel, loading it only on first use.
+
+    Building the model reads hundreds of MB of weights, so it is kept alive
+    for the whole process instead of being rebuilt on every transcription.
+    `device` is "cpu" or "cuda"; if None, CUDA is used when available.
+    """
+    if device is None:
+        device, compute_type = detect_whisper_device()
+    else:
+        compute_type = "float16" if device == "cuda" else "int8"
+    if device == "cuda":
+        preload_nvidia_libraries()
+    return _load_whisper_model(model_size, device, compute_type)
+
+
 def speech_to_text(
     audio: "np.ndarray",
     language: str,
@@ -206,16 +285,6 @@ def speech_to_text(
     `audio` is a mono float32 np.ndarray at 16 kHz, as returned by
     record_from_microphone(). `device` is "cpu" or "cuda"; if None, CUDA is used when available.
     """
-    # Imported lazily: faster-whisper is heavy and only needed for this command.
-    from faster_whisper import WhisperModel
-
-    if device is None:
-        device, compute_type = detect_whisper_device()
-    else:
-        compute_type = "float16" if device == "cuda" else "int8"
-    # print(f"Whisper device: {device} (compute type: {compute_type})")
-    if device == "cuda":
-        preload_nvidia_libraries()
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    segments, info = model.transcribe(audio, language=language)
+    model = get_whisper_model(model_size, device)
+    segments, _info = model.transcribe(audio, language=language)
     return " ".join(segment.text.strip() for segment in segments)
