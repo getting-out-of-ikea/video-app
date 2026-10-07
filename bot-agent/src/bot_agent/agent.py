@@ -6,8 +6,8 @@ Run it with::
     uv run bot-agent start    # production
 
 The worker registers itself under the name ``llm-bot``; the webapp asks for it
-through the ``roomConfig.agents`` field of the access token it mints in
-``webapp/src/routes/api/token/+server.ts``. The two names must stay in sync.
+through the Agent Dispatch API from ``webapp/src/routes/api/token/+server.ts``.
+The two names must stay in sync.
 
 The pipeline is STT -> LLM -> TTS:
 
@@ -27,7 +27,14 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
+from livekit.agents import (
+    Agent,
+    AgentSession,
+    JobContext,
+    RoomOutputOptions,
+    WorkerOptions,
+    cli,
+)
 from livekit.plugins import openai, silero
 
 from .plugins import PiperTTS, WhisperSTT
@@ -108,12 +115,19 @@ async def entrypoint(ctx: JobContext) -> None:
             voice=_optional_env("BOT_VOICE"),
             speed=float(_optional_env("BOT_SPEED") or DEFAULT_SPEED),
         ),
-        # Publish both sides of the conversation into the room: the webapp
-        # renders them from RoomEvent.TranscriptionReceived.
-        transcription_enabled=True,
     )
 
-    await session.start(room=ctx.room, agent=Bot())
+    await session.start(
+        room=ctx.room,
+        agent=Bot(),
+        # Publish both sides of the conversation into the room: the webapp
+        # renders them from RoomEvent.TranscriptionReceived. Room-side
+        # behaviour (audio and transcription publishing) is configured here
+        # via RoomOutputOptions, not on the AgentSession constructor. The
+        # default is True, but we set it explicitly so a future default change
+        # can't silently swallow the transcript the UI depends on.
+        room_output_options=RoomOutputOptions(transcription_enabled=True),
+    )
     await session.generate_reply(instructions=GREETING)
 
 
