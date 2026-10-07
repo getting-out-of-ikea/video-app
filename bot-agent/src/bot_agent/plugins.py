@@ -37,7 +37,7 @@ from livekit.agents import (
 )
 from livekit.agents.types import NOT_GIVEN, NotGivenOr
 
-from services import stt_tts
+from bot_agent import stt_tts
 
 logger = logging.getLogger("bot-agent.plugins")
 
