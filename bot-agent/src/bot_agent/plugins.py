@@ -67,8 +67,18 @@ def _resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
 
 
 def _buffer_to_mono_16k(buffer: utils.AudioBuffer) -> np.ndarray:
-    """Flatten an AudioBuffer into the mono float32 / 16 kHz array Whisper wants."""
-    frames = list(buffer)
+    """Flatten an AudioBuffer into the mono float32 / 16 kHz array Whisper wants.
+
+    `utils.AudioBuffer` is declared as `list[AudioFrame] | AudioFrame`, and the
+    pipeline hands us either form depending on version and codepath (in
+    livekit-agents 1.8.x the batch recognizer passes a single frame). Normalize
+    both so the caller always sees one code path.
+    """
+    if isinstance(buffer, rtc.AudioFrame):
+        frames: list[rtc.AudioFrame] = [buffer]
+    else:
+        frames = list(buffer)
+
     if not frames:
         return np.zeros(0, dtype=np.float32)
 
@@ -177,7 +187,14 @@ class PiperTTS(tts.TTS):
 
 
 class _PiperChunkedStream(tts.ChunkedStream):
-    """Renders one phrase with Piper and emits it as a single audio frame."""
+    """Renders one phrase with Piper and emits it as a single audio frame.
+
+    `ChunkedStream._run` receives an `AudioEmitter` from the base class; that
+    is the only supported way to publish audio, since the base class owns the
+    request id, event channel and end-of-stream bookkeeping. Writing into
+    `self._event_ch` directly was the pre-1.8 interface and is no longer
+    called by the framework.
+    """
 
     def __init__(
         self,
@@ -194,7 +211,7 @@ class _PiperChunkedStream(tts.ChunkedStream):
         self._voice = voice
         self._speed = speed
 
-    async def _run(self) -> None:
+    async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         audio, sample_rate = await asyncio.to_thread(
             stt_tts.synthesize_pcm,
             self._input_text,
@@ -202,6 +219,15 @@ class _PiperChunkedStream(tts.ChunkedStream):
             self._voice,
             self._speed,
         )
+
+        output_emitter.initialize(
+            request_id=self.request_id,
+            sample_rate=sample_rate,
+            num_channels=1,
+            mime_type="audio/pcm",
+            stream=False,
+        )
+
         if audio.size == 0:
             return
 
@@ -210,12 +236,11 @@ class _PiperChunkedStream(tts.ChunkedStream):
         if audio.ndim > 1:
             audio = audio.mean(axis=1).astype(np.int16)
 
-        frame = rtc.AudioFrame(
-            data=audio.tobytes(),
-            sample_rate=sample_rate,
-            num_channels=1,
-            samples_per_channel=audio.shape[0],
-        )
-        self._event_ch.send_nowait(
-            tts.SynthesizedAudio(request_id=self.request_id, frame=frame)
+        output_emitter.push(
+            rtc.AudioFrame(
+                data=audio.tobytes(),
+                sample_rate=sample_rate,
+                num_channels=1,
+                samples_per_channel=audio.shape[0],
+            )
         )
