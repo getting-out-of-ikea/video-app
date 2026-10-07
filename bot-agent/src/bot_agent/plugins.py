@@ -220,8 +220,11 @@ class _PiperChunkedStream(tts.ChunkedStream):
             self._speed,
         )
 
+        # `ChunkedStream` generates the request id internally; it is exposed
+        # as `_request_id`, not as a public `request_id` attribute. The
+        # emitter tags every frame with it, so use the base class value.
         output_emitter.initialize(
-            request_id=self.request_id,
+            request_id=self._request_id,
             sample_rate=sample_rate,
             num_channels=1,
             mime_type="audio/pcm",

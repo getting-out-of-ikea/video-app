@@ -2,6 +2,7 @@
 
 import json
 import site
+import sys
 
 from functools import lru_cache
 from pathlib import Path
@@ -199,11 +200,12 @@ def text_to_speech(
 
 
 # Guards preload_nvidia_libraries() so the CUDA libraries are dlopen()ed at
-# most once per process, however many transcriptions run.
-_nvidia_libraries_preloaded = False
+# most once per process, however many transcriptions run. Tri-state: None
+# means "not attempted yet", True/False is the cached outcome.
+_nvidia_libraries_preloaded: bool | None = None
 
 
-def preload_nvidia_libraries() -> None:
+def preload_nvidia_libraries() -> bool:
     """Preload the CUDA libraries bundled with the nvidia pip packages.
 
     CTranslate2 loads libcublas/libcudnn with dlopen, which doesn't search
@@ -212,18 +214,43 @@ def preload_nvidia_libraries() -> None:
     just fix the search path.) Loading them explicitly with RTLD_GLOBAL
     makes them findable. Must be called before the first CTranslate2 model
     is created.
+
+    Returns True when libcublas.so.12 is available to CTranslate2 after the
+    preload, False otherwise. Callers should fall back to the CPU on False:
+    `ctranslate2.get_cuda_device_count()` can report devices even when the
+    runtime libraries are missing, which is exactly the failure mode this
+    function exists to detect. The result is cached, so repeated calls are
+    cheap and won't re-scan the filesystem.
     """
     global _nvidia_libraries_preloaded
-    if _nvidia_libraries_preloaded:
-        return
+    if _nvidia_libraries_preloaded is not None:
+        return _nvidia_libraries_preloaded
 
     import ctypes
 
-    lib_dirs = []
-    for site_packages in site.getsitepackages():
-        nvidia_dir = Path(site_packages) / "nvidia"
+    # The nvidia wheels live in the active environment's site-packages, which
+    # is what `sys.path` reflects. `site.getsitepackages()` under a virtualenv
+    # can point at the system Python, so check both, deduplicated.
+    roots: list[str] = []
+    for candidate in list(sys.path) + list(site.getsitepackages()):
+        if candidate and candidate not in roots:
+            roots.append(candidate)
+
+    lib_dirs: list[Path] = []
+    for root in roots:
+        nvidia_dir = Path(root) / "nvidia"
         if nvidia_dir.is_dir():
-            lib_dirs.extend(nvidia_dir.glob("*/lib"))
+            lib_dirs.extend(d for d in nvidia_dir.glob("*/lib") if d.is_dir())
+
+    if not lib_dirs:
+        print(
+            "No bundled NVIDIA libraries found; faster-whisper will run on "
+            "the CPU. Install nvidia-cublas-cu12 and nvidia-cudnn-cu12 to use "
+            "the GPU with a pip-installed CUDA runtime."
+        )
+        _nvidia_libraries_preloaded = False
+        return False
+
     for lib_dir in lib_dirs:
         libs = sorted(lib_dir.glob("lib*.so*"))
         # Two passes: the first loads the base libraries, the second those
@@ -234,18 +261,33 @@ def preload_nvidia_libraries() -> None:
                     ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
                 except OSError:
                     pass
+
+    # Prove that libcublas is now reachable by name, which is what
+    # CTranslate2 will dlopen() at runtime. If it isn't, we would rather fall
+    # back to CPU up front than crash on the first transcription.
+    try:
+        ctypes.CDLL("libcublas.so.12", mode=ctypes.RTLD_GLOBAL)
+    except OSError as e:
+        print(f"libcublas.so.12 is not loadable ({e}); falling back to the CPU.")
+        _nvidia_libraries_preloaded = False
+        return False
+
     _nvidia_libraries_preloaded = True
+    return True
 
 
 def detect_whisper_device() -> tuple[str, str]:
     """Return the (device, compute_type) Whisper should run with.
 
-    Uses the GPU with float16 when a CUDA device is available, otherwise
-    falls back to the CPU with int8 quantization.
+    Uses the GPU with float16 when a CUDA device is available *and* the
+    required CUDA runtime libraries could be loaded; otherwise falls back to
+    the CPU with int8 quantization. Requiring the preload to succeed is what
+    keeps a CUDA-capable machine with a broken/missing nvidia pip install
+    from crashing on the first utterance.
     """
     import ctranslate2
 
-    if ctranslate2.get_cuda_device_count() > 0:
+    if ctranslate2.get_cuda_device_count() > 0 and preload_nvidia_libraries():
         return "cuda", "float16"
     return "cpu", "int8"
 
@@ -264,14 +306,22 @@ def get_whisper_model(model_size: str = "base", device: str | None = None) -> "W
 
     Building the model reads hundreds of MB of weights, so it is kept alive
     for the whole process instead of being rebuilt on every transcription.
-    `device` is "cpu" or "cuda"; if None, CUDA is used when available.
+    `device` is "cpu" or "cuda"; if None, CUDA is used when available (and
+    only when the CUDA runtime libraries are actually loadable).
     """
     if device is None:
         device, compute_type = detect_whisper_device()
+    elif device == "cuda":
+        if preload_nvidia_libraries():
+            compute_type = "float16"
+        else:
+            print(
+                "CUDA was requested but the NVIDIA libraries are not "
+                "available; falling back to the CPU."
+            )
+            device, compute_type = "cpu", "int8"
     else:
-        compute_type = "float16" if device == "cuda" else "int8"
-    if device == "cuda":
-        preload_nvidia_libraries()
+        compute_type = "int8"
     return _load_whisper_model(model_size, device, compute_type)
 
 
