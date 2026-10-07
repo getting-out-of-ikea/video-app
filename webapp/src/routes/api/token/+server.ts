@@ -10,8 +10,11 @@ export const POST: RequestHandler = async ({ request, locals: { safeGetSession }
 		error(401, 'Autenticazione richiesta.');
 	}
 
-	const body = (await request.json().catch(() => null)) as { room?: unknown } | null;
+	const body = (await request.json().catch(() => null)) as
+		| { room?: unknown; mode?: unknown }
+		| null;
 	const room = typeof body?.room === 'string' ? body.room : '';
+	const mode = body?.mode === 'bot' ? 'bot' : 'room';
 
 	if (!isValidRoomName(room)) {
 		error(400, 'Nome della stanza non valido.');
@@ -20,7 +23,10 @@ export const POST: RequestHandler = async ({ request, locals: { safeGetSession }
 	const token = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
 		identity: user.id,
 		name: user.email ?? user.id,
-		ttl: '1h'
+		ttl: '1h',
+		// In bot mode, ask LiveKit to dispatch the "llm-bot" agent worker into
+		// the room. See bot.md §4.5 and §5 for the worker side.
+		...(mode === 'bot' ? { roomConfig: { agents: [{ agentName: 'llm-bot' }] } } : {})
 	});
 	token.addGrant({
 		roomJoin: true,

@@ -15,7 +15,17 @@
 	let roomName = $state('');
 	let roomError = $state('');
 
+	// Small "bot" prompt, same pattern as the room one
+	let showBotPrompt = $state(false);
+	let botName = $state('');
+	let botError = $state('');
+
 	onMount(() => {
+		// Seed the default bot conversation name (one per user) once the
+		// authenticated user is known. Done here instead of during `$state`
+		// init to avoid the `state_referenced_locally` warning in Svelte 5.
+		botName = data.user ? `bot-${data.user.id.slice(0, 8)}` : 'bot';
+
 		// Browser client used only to react to auth state changes
 		// (sign in, sign out, token refresh) and refresh server data
 		const supabase = createBrowserClient(PUBLIC_SUPABASE_URL, PUBLIC_SUPABASE_PUBLISHABLE_KEY);
@@ -46,6 +56,22 @@
 		roomName = '';
 		roomError = '';
 		goto(resolve('/stanza/[nome]', { nome: name }));
+	}
+
+	function toggleBotPrompt() {
+		showBotPrompt = !showBotPrompt;
+		botError = '';
+	}
+
+	function goToBot() {
+		const name = botName.trim();
+		if (!isValidRoomName(name)) {
+			botError = 'Usa solo lettere minuscole, numeri e trattini (1-64 caratteri).';
+			return;
+		}
+		showBotPrompt = false;
+		botError = '';
+		goto(resolve('/bot/[nome]', { nome: name }));
 	}
 </script>
 
@@ -85,6 +111,45 @@
 						<button
 							type="button"
 							onclick={goToRoom}
+							class="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700"
+						>
+							Ok
+						</button>
+					</div>
+				</div>
+			{/if}
+		</div>
+		<div class="relative">
+			<button
+				type="button"
+				onclick={toggleBotPrompt}
+				class="rounded-md border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+			>
+				Bot
+			</button>
+			{#if showBotPrompt}
+				<div
+					class="absolute top-full left-0 z-10 mt-2 w-56 rounded-md border border-gray-200 bg-white p-3 shadow-lg"
+				>
+					<label class="block text-xs font-medium text-gray-700">
+						Nome conversazione
+						<input
+							type="text"
+							bind:value={botName}
+							onkeydown={(e) => {
+								if (e.key === 'Enter') goToBot();
+							}}
+							placeholder="es. bot-mario"
+							class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-sm"
+						/>
+					</label>
+					{#if botError}
+						<p class="mt-2 text-xs text-red-600">{botError}</p>
+					{/if}
+					<div class="mt-2 flex justify-end">
+						<button
+							type="button"
+							onclick={goToBot}
 							class="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700"
 						>
 							Ok
