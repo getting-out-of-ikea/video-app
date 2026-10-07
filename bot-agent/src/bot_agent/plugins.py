@@ -191,9 +191,9 @@ class _PiperChunkedStream(tts.ChunkedStream):
 
     `ChunkedStream._run` receives an `AudioEmitter` from the base class; that
     is the only supported way to publish audio, since the base class owns the
-    request id, event channel and end-of-stream bookkeeping. Writing into
-    `self._event_ch` directly was the pre-1.8 interface and is no longer
-    called by the framework.
+    event channel and end-of-stream bookkeeping. Writing into `self._event_ch`
+    directly was the pre-1.8 interface and is no longer called by the
+    framework.
     """
 
     def __init__(
@@ -220,11 +220,14 @@ class _PiperChunkedStream(tts.ChunkedStream):
             self._speed,
         )
 
-        # `ChunkedStream` generates the request id internally; it is exposed
-        # as `_request_id`, not as a public `request_id` attribute. The
-        # emitter tags every frame with it, so use the base class value.
+        # `_run` is responsible for picking the request id passed to the
+        # emitter; the base class does not expose one as an attribute (both
+        # `request_id` and `_request_id` are absent in livekit-agents 1.8.x).
+        # This matches what the bundled plugins do (they generate an id with
+        # `utils.shortuuid()`). We only synthesize one phrase at a time and
+        # push a single frame, so nothing downstream needs to correlate it.
         output_emitter.initialize(
-            request_id=self._request_id,
+            request_id=utils.shortuuid(),
             sample_rate=sample_rate,
             num_channels=1,
             mime_type="audio/pcm",
