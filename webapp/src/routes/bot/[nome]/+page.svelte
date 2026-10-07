@@ -2,6 +2,7 @@
 	import {
 		ConnectionState,
 		ParticipantEvent,
+		ParticipantKind,
 		Room,
 		RoomEvent,
 		type Participant,
@@ -155,14 +156,32 @@
 		updateAgentState();
 	}
 
+	/**
+	 * A participant counts as the agent when:
+	 *   1. the LiveKit server labelled it as such (`ParticipantKind.AGENT`),
+	 *      which is what current versions of `livekit-agents` do; or
+	 *   2. it advertises one of the `lk.agent.*` attributes (older agents that
+	 *      haven't published their state yet, and the intermediate period
+	 *      between `ctx.connect()` and `session.start()`); or
+	 *   3. it uses the historical `agent-*` identity prefix.
+	 *
+	 * Checking `kind` first is what fixes the "in attesa del bot" symptom: the
+	 * participant shows up as `AGENT` as soon as the dispatch lands, and we no
+	 * longer depend on the `lk.agent.state` attribute being set on the very
+	 * first event.
+	 */
+	function isAgentParticipant(p: RemoteParticipant): boolean {
+		if (p.kind === ParticipantKind.AGENT) return true;
+		if (p.attributes['lk.agent.state'] !== undefined) return true;
+		if (p.attributes['lk.agent.name'] !== undefined) return true;
+		if (p.identity.startsWith('agent-')) return true;
+		return false;
+	}
+
 	function syncAgent() {
 		if (!room) return;
 
-		// Heuristic: a LiveKit Agent publishes `lk.agent.state` on its own
-		// attributes; some deployments also use an `agent-` identity prefix.
-		const found = [...room.remoteParticipants.values()].find(
-			(p) => p.attributes['lk.agent.state'] !== undefined || p.identity.startsWith('agent-')
-		);
+		const found = [...room.remoteParticipants.values()].find(isAgentParticipant);
 
 		if (found !== agentParticipant) {
 			agentParticipant?.off(ParticipantEvent.AttributesChanged, onAgentAttributesChanged);
