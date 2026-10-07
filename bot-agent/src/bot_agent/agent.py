@@ -11,10 +11,11 @@ through the ``roomConfig.agents`` field of the access token it mints in
 
 The pipeline is STT -> LLM -> TTS:
 
-* STT and TTS run locally, on top of the helpers in :mod:`services.stt_tts`
+* STT and TTS run locally, on top of the helpers in :mod:`bot_agent.stt_tts`
   (faster-whisper and Piper) via the adapters in :mod:`bot_agent.plugins`;
-* the LLM is a remote OpenAI-compatible endpoint (OpenAI by default, any
-  ``OPENAI_BASE_URL`` otherwise).
+* the LLM is a remote OpenAI-compatible endpoint. DeepSeek is the default
+  (``LLM_BASE_URL`` defaults to their API, ``LLM_MODEL`` to ``deepseek-chat``),
+  but any compatible service works by changing those two variables.
 
 Everything that can be configured lives in the environment; see
 ``bot-agent/.env.example``.
@@ -35,7 +36,8 @@ from .plugins import PiperTTS, WhisperSTT
 AGENT_NAME = "llm-bot"
 
 DEFAULT_LANGUAGE = "it"
-DEFAULT_LLM_MODEL = "gpt-4o-mini"
+DEFAULT_LLM_BASE_URL = "https://api.deepseek.com/v1"
+DEFAULT_LLM_MODEL = "deepseek-chat"
 DEFAULT_WHISPER_MODEL = "base"
 DEFAULT_SPEED = "0.7"
 
@@ -71,6 +73,17 @@ async def entrypoint(ctx: JobContext) -> None:
     language = _optional_env("BOT_LANGUAGE") or DEFAULT_LANGUAGE
     logger.info("starting llm-bot session (language=%s)", language)
 
+    # Read the API key up front so a missing .env fails with a clear message
+    # here, instead of surfacing later as an opaque 401 from the LLM provider.
+    # We pass it to the plugin explicitly rather than relying on OPENAI_API_KEY,
+    # so the worker never silently falls back to an OpenAI account.
+    llm_api_key = _optional_env("LLM_API_KEY")
+    if not llm_api_key:
+        raise RuntimeError(
+            "LLM_API_KEY is not set. Copy bot-agent/.env.example to .env and "
+            "fill in your provider's API key."
+        )
+
     # Constructing the plugins is synchronous and loads the local models.
     # That is deliberate (and matches how livekit's own silero.VAD.load() is
     # used): the job starts a fraction of a second slower, and the first
@@ -83,9 +96,12 @@ async def entrypoint(ctx: JobContext) -> None:
             language=language,
             model_size=_optional_env("WHISPER_MODEL") or DEFAULT_WHISPER_MODEL,
         ),
+        # The plugin name is `openai`, but the service is whatever LLM_BASE_URL
+        # points at. DeepSeek by default.
         llm=openai.LLM(
             model=_optional_env("LLM_MODEL") or DEFAULT_LLM_MODEL,
-            base_url=_optional_env("OPENAI_BASE_URL"),
+            base_url=_optional_env("LLM_BASE_URL") or DEFAULT_LLM_BASE_URL,
+            api_key=llm_api_key,
         ),
         tts=PiperTTS(
             language=language,
